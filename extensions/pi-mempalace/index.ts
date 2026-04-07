@@ -935,7 +935,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // -----------------------------------------------------------------------
 
   pi.registerCommand("memory", {
-    description: "Memory management: status, search, flush, project, on/off",
+    description: "Memory management: status, search, project, graph, knowledge, on/off",
     handler: async (args, ctx) => {
       const runtime = getRuntime(ctx);
       const parts = (args || "").trim().split(/\s+/);
