@@ -452,6 +452,242 @@ async function runTests() {
   });
 
   // -------------------------------------------------------------------
+  // Chunking tests
+  // -------------------------------------------------------------------
+
+  test("chunking: short content stored as single memory", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const r = await store.store({ content: "short content" });
+      assert.equal(r.status, "stored");
+      assert.equal(store.size, 1);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("chunking: long content split into multiple chunks", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      // Create content > 800 chars
+      const longContent = "This is a paragraph about databases. ".repeat(30) + "\n\n" +
+        "This is a paragraph about authentication. ".repeat(30) + "\n\n" +
+        "This is a paragraph about deployment. ".repeat(30);
+      assert.ok(longContent.length > 800, "Content should exceed chunk size");
+
+      const r = await store.store({ content: longContent, project: "chunky" });
+      assert.equal(r.status, "stored");
+      // Should have multiple chunks
+      assert.ok(store.size > 1, `Expected multiple chunks, got ${store.size}`);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("chunking: chunks are searchable", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const longContent = "PostgreSQL is our primary database for all transactional workloads. ".repeat(20) + "\n\n" +
+        "Redis is used for caching and session storage across all services. ".repeat(20);
+
+      await store.store({ content: longContent, project: "infra" });
+      const result = await store.search("database choice");
+      assert.ok(result.results.length > 0, "Should find chunks via search");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Palace Graph tests
+  // -------------------------------------------------------------------
+
+  test("palace graph: empty store", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const graph = store.getPalaceGraph();
+      assert.equal(graph.nodes.length, 0);
+      assert.equal(graph.edges.length, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("palace graph: discovers tunnels", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      // Two projects sharing "auth" topic
+      await store.store({ content: "auth in proj A", project: "projA", topic: "auth" });
+      await store.store({ content: "auth in proj B", project: "projB", topic: "auth" });
+      // A unique topic
+      await store.store({ content: "db in proj A", project: "projA", topic: "database" });
+
+      const tunnels = store.discoverTunnels();
+      assert.equal(tunnels.length, 1);
+      assert.equal(tunnels[0].topic, "auth");
+      assert.ok(tunnels[0].projects.includes("projA"));
+      assert.ok(tunnels[0].projects.includes("projB"));
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("palace graph: traverse tunnel", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.store({ content: "auth logic in A", project: "projA", topic: "auth" });
+      await store.store({ content: "auth logic in B", project: "projB", topic: "auth" });
+
+      const results = store.traverseTunnel("auth", "projA", "projB");
+      assert.equal(results.length, 2);
+      const projects = results.map(r => r.project).sort();
+      assert.deepEqual(projects, ["projA", "projB"]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("palace graph: full graph structure", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.store({ content: "a1", project: "p1", topic: "auth" });
+      await store.store({ content: "a2", project: "p2", topic: "auth" });
+      await store.store({ content: "d1", project: "p1", topic: "database" });
+
+      const graph = store.getPalaceGraph();
+      assert.equal(graph.nodes.length, 2);
+      assert.equal(graph.edges.length, 1);
+      assert.equal(graph.edges[0].topic, "auth");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Knowledge Graph tests
+  // -------------------------------------------------------------------
+
+  test("knowledge: add entity", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const r = store.addEntity({ name: "PostgreSQL", entity_type: "technology" });
+      assert.equal(r.status, "created");
+      assert.ok(r.id.startsWith("ent_"));
+
+      // Update
+      const r2 = store.addEntity({ name: "PostgreSQL", entity_type: "database", id: r.id });
+      assert.equal(r2.status, "updated");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("knowledge: add triple", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const r = store.addTriple({
+        subject: "myapp",
+        predicate: "uses",
+        object: "PostgreSQL",
+        valid_from: "2025-01-01",
+        project: "myapp",
+      });
+      assert.equal(r.status, "created");
+      assert.ok(r.id > 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("knowledge: query entity facts", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      store.addTriple({ subject: "myapp", predicate: "uses", object: "PostgreSQL" });
+      store.addTriple({ subject: "myapp", predicate: "uses", object: "Redis" });
+      store.addTriple({ subject: "Alice", predicate: "created", object: "myapp" });
+
+      const result = store.queryEntity("myapp");
+      assert.ok(result.entity);
+      assert.equal(result.facts.length, 3);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("knowledge: temporal query", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      store.addTriple({
+        subject: "myapp", predicate: "uses", object: "MySQL",
+        valid_from: "2024-01-01", valid_to: "2025-06-01",
+      });
+      store.addTriple({
+        subject: "myapp", predicate: "uses", object: "PostgreSQL",
+        valid_from: "2025-06-01",
+      });
+
+      // Query at 2024-06
+      const past = store.queryEntity("myapp", { at_time: "2024-06-01" });
+      assert.equal(past.facts.length, 1);
+      assert.equal(past.facts[0].object, "MySQL");
+
+      // Query at 2025-09
+      const present = store.queryEntity("myapp", { at_time: "2025-09-01" });
+      assert.equal(present.facts.length, 1);
+      assert.equal(present.facts[0].object, "PostgreSQL");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("knowledge: query by predicate", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      store.addTriple({ subject: "app1", predicate: "uses", object: "React" });
+      store.addTriple({ subject: "app2", predicate: "uses", object: "Vue" });
+      store.addTriple({ subject: "app1", predicate: "depends_on", object: "Node" });
+
+      const uses = store.queryByPredicate("uses");
+      assert.equal(uses.length, 2);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("knowledge: invalidate triple", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const r = store.addTriple({
+        subject: "myapp", predicate: "uses", object: "MySQL",
+        valid_from: "2024-01-01",
+      });
+      store.invalidateTriple(r.id, "2025-06-01");
+
+      // Should not appear in present query
+      const result = store.queryEntity("myapp", { at_time: "2025-09-01" });
+      assert.equal(result.facts.length, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("knowledge: stats", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      store.addTriple({ subject: "app", predicate: "uses", object: "React" });
+      store.addTriple({ subject: "app", predicate: "uses", object: "Node" });
+
+      const stats = store.knowledgeStats();
+      assert.equal(stats.entityCount, 3); // app, React, Node
+      assert.equal(stats.tripleCount, 2);
+      assert.equal(stats.activeTriples, 2);
+      assert.equal(stats.predicates["uses"], 2);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // -------------------------------------------------------------------
   // Run all tests
   // -------------------------------------------------------------------
 

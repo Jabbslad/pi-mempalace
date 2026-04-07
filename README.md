@@ -69,12 +69,26 @@ memory_status()
 
 ## 🧰 Tools
 
+### Memory Tools
 | Tool | What It Does |
 |------|-------------|
 | `memory_search` | Semantic search across all stored memories — find things by meaning |
 | `memory_save` | Explicitly save important info — for those "remember this" moments |
 | `memory_recall` | Browse memories by project/topic — like flipping through a journal |
 | `memory_status` | Memory store overview — how big is your brain now? |
+
+### Palace Graph Tools
+| Tool | What It Does |
+|------|-------------|
+| `memory_graph` | Visualize the palace — projects as wings, shared topics as tunnel connections |
+| `memory_tunnel` | Traverse a tunnel between two projects via a shared topic |
+
+### Knowledge Graph Tools
+| Tool | What It Does |
+|------|-------------|
+| `knowledge_add` | Add structured facts — "myapp uses PostgreSQL since 2025-01" |
+| `knowledge_query` | Query facts about an entity, with temporal filtering — "what did we use in 2024?" |
+| `knowledge_status` | Knowledge graph stats — entities, facts, predicates |
 
 ## ⌨️ Commands
 
@@ -84,6 +98,8 @@ memory_status()
 | `/memory stats` | Full stats overlay with sparklines and bar charts |
 | `/memory project <name>` | Set current project context |
 | `/memory search <query>` | Quick search shortcut |
+| `/memory graph` | Show palace graph with cross-project connections |
+| `/memory knowledge <entity>` | Query knowledge graph for an entity |
 | `/memory on` / `off` | Enable/disable memory (for those private moments) |
 
 ---
@@ -157,11 +173,25 @@ Memories live in a SQLite database at `~/.pi/agent/memory/memories.db`, powered 
 
 ---
 
-## 🎭 The MemPalace Lineage
+## 🏰 The Full MemPalace Architecture
 
 The original [MemPalace](https://www.mempalace.tech) uses a gorgeous metaphorical architecture — **Wings** (top-level containers), **Rooms** (topics), **Halls** (corridors by memory type), **Closets** (compressed summaries), and **Drawers** (verbatim source files). It runs on Python with ChromaDB and includes AAAK, a custom 30x compression dialect that any LLM can read natively.
 
-pi-mempalace takes the same philosophical core — *store everything verbatim, search semantically* — and translates it into the pi ecosystem as a lightweight TypeScript extension. We implement the same **4-layer memory stack** (Identity → Essential Story → On-Demand Context → Deep Search) using SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) instead of ChromaDB. Same indexed vector search, same metadata pre-filtering, same lazy loading — just without the Python dependency. The soul is the same: **your AI should remember you.**
+pi-mempalace faithfully implements the core MemPalace architecture in TypeScript:
+
+| MemPalace Concept | pi-mempalace Implementation |
+|---|---|
+| **Wings** (projects/people) | `project` field — auto-detected from git repo |
+| **Rooms** (topics within wings) | `topic` field — set per memory |
+| **Drawers** (verbatim chunks) | 800-char chunks with 100-char overlap, each with its own embedding |
+| **Tunnels** (cross-wing connections) | `memory_graph` discovers shared topics across projects |
+| **4-Layer Stack** | L0 Identity → L1 Essential Story → L2 On-Demand → L3 Deep Search |
+| **Knowledge Graph** | Temporal triples with `valid_from`/`valid_to` — "what was true when?" |
+| **ChromaDB** | SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) — same HNSW indexing, no Python |
+
+The one thing we deliberately skip is **AAAK compression** — MemPalace's own benchmarks show it drops accuracy from 96.6% to 84.2%. We'll take the storage cost over the precision loss.
+
+The soul is the same: **your AI should remember you.**
 
 If you want the full palace experience with all its wings and halls and drawers, go check out [mempalace.tech](https://www.mempalace.tech). Milla and Ben built something special.
 
@@ -172,8 +202,11 @@ If you want the full palace experience with all its wings and halls and drawers,
 You absolutely could! MemPalace is great. But if you're already living in the pi ecosystem:
 
 - **No Python required** — pi-mempalace is pure TypeScript, runs in-process
-- **Same architecture** — 4-layer memory stack, indexed vector search, metadata pre-filtering
+- **Full MemPalace architecture** — 4-layer stack, chunking, palace graph, knowledge graph
 - **SQLite instead of ChromaDB** — one file, no server, native Node.js via better-sqlite3
+- **Palace graph with tunnels** — discover cross-project connections via shared topics
+- **Temporal knowledge graph** — structured facts with time validity ("what was true when?")
+- **Auto-chunking** — long content split into 800-char chunks with overlap, just like MemPalace
 - **Native pi integration** — hooks into pi's extension system, session lifecycle, and TUI
 - **Auto-capture built in** — no manual memory management needed
 - **Wake-up context** — L0 identity + L1 essential story, injected before you even ask

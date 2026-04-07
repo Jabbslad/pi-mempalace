@@ -21,7 +21,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
-import type { MemoryStats } from "./memory_store.js";
+import type { MemoryStats, PalaceGraph, TunnelInfo, KnowledgeResult, KnowledgeStats, Fact } from "./memory_store.js";
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -439,7 +439,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "\n\n## Agent Memory (ACTIVE)\n" +
       "You have persistent memory across sessions. Previous conversations and decisions are stored and searchable.\n" +
       "Use `memory_search` to find past context. Use `memory_save` to explicitly remember something important.\n" +
-      "Use `memory_recall` to browse memories for a specific project or topic.\n\n" +
+      "Use `memory_recall` to browse memories for a specific project or topic.\n" +
+      "Use `memory_graph` to discover cross-project connections via shared topics.\n" +
+      "Use `knowledge_add` to record structured facts. Use `knowledge_query` to query them.\n\n" +
       runtime.wakeUpText;
 
     return {
@@ -660,6 +662,25 @@ export default function memoryExtension(pi: ExtensionAPI) {
           }
         }
 
+        // Knowledge graph stats
+        try {
+          const kgStats = runtime.store.knowledgeStats();
+          if (kgStats.entityCount > 0) {
+            text += `\n### Knowledge Graph\n`;
+            text += `- Entities: ${kgStats.entityCount}\n`;
+            text += `- Facts: ${kgStats.tripleCount} (${kgStats.activeTriples} active)\n`;
+          }
+        } catch { /* KG not available yet */ }
+
+        // Palace graph tunnels
+        try {
+          const graph = runtime.store.getPalaceGraph();
+          if (graph.edges.length > 0) {
+            text += `\n### Palace Tunnels\n`;
+            text += `- ${graph.edges.length} tunnel(s) connecting projects\n`;
+          }
+        } catch { /* Graph not available yet */ }
+
         return textResult(text, { totalMemories: result.total_memories, projects: result.projects });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -667,6 +688,246 @@ export default function memoryExtension(pi: ExtensionAPI) {
       }
     },
 
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_graph ---
+  pi.registerTool({
+    name: "memory_graph",
+    label: "Memory Graph",
+    description: "Show the palace graph: projects as nodes, shared topics as tunnel connections between them. Reveals cross-project relationships.",
+    promptSnippet: "memory_graph() — view cross-project connections via shared topics",
+    promptGuidelines: [
+      "Use when the user asks about connections between projects",
+      "Shows which topics create 'tunnels' between different projects",
+      "Helps discover hidden relationships in the memory palace",
+    ],
+    parameters: Type.Object({}),
+
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const graph = runtime.store.getPalaceGraph();
+        
+        if (graph.nodes.length === 0) {
+          return textResult("No projects in the palace yet.");
+        }
+        
+        let text = "## \uD83C\uDFF0 Palace Graph\n\n";
+        
+        // Nodes (projects)
+        text += "### Wings (Projects)\n";
+        for (const node of graph.nodes.sort((a, b) => b.memoryCount - a.memoryCount)) {
+          const topics = node.topics.length > 0 ? ` — rooms: ${node.topics.join(", ")}` : "";
+          text += `- **${node.name}** (${node.memoryCount} memories)${topics}\n`;
+        }
+        
+        // Edges (tunnels)
+        if (graph.edges.length > 0) {
+          text += "\n### Tunnels (Cross-Project Connections)\n";
+          for (const edge of graph.edges.sort((a, b) => b.strength - a.strength)) {
+            text += `- \uD83D\uDD17 **${edge.projectA}** \u2194 **${edge.projectB}** via topic "${edge.topic}" (${edge.strength} shared memories)\n`;
+          }
+        } else {
+          text += "\n*No tunnels yet — topics are project-unique. Shared topics across projects create tunnel connections.*\n";
+        }
+        
+        return textResult(text, { nodeCount: graph.nodes.length, edgeCount: graph.edges.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Palace graph failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_tunnel ---
+  pi.registerTool({
+    name: "memory_tunnel",
+    label: "Memory Tunnel",
+    description: "Traverse a tunnel between two projects via a shared topic. Returns memories from both projects for that topic.",
+    promptSnippet: "memory_tunnel(topic, project_a, project_b, n_results?) — traverse cross-project connection",
+    promptGuidelines: [
+      "Use after memory_graph reveals a tunnel connection",
+      "Shows how the same topic is discussed in different project contexts",
+      "Good for finding cross-cutting concerns like auth, database, or architecture patterns",
+    ],
+    parameters: Type.Object({
+      topic: Type.String({ description: "The shared topic to traverse" }),
+      project_a: Type.String({ description: "First project" }),
+      project_b: Type.String({ description: "Second project" }),
+      n_results: Type.Optional(Type.Number({ description: "Results per project (default: 10)" })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const results = runtime.store.traverseTunnel(
+          params.topic, params.project_a, params.project_b, params.n_results
+        );
+        
+        if (results.length === 0) {
+          return textResult(`No memories found in tunnel: ${params.project_a} \u2194 ${params.project_b} via "${params.topic}"`);
+        }
+        
+        let text = `## \uD83D\uDD17 Tunnel: ${params.project_a} \u2194 ${params.project_b} via "${params.topic}"\n\n`;
+        for (const item of results) {
+          text += `[${item.project}/${item.topic}] (${item.timestamp})\n`;
+          text += `${item.text}\n\n---\n\n`;
+        }
+        
+        return textResult(text, { count: results.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Tunnel traversal failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- knowledge_add ---
+  pi.registerTool({
+    name: "knowledge_add",
+    label: "Knowledge Add",
+    description: "Add a structured fact (triple) to the knowledge graph. Facts are temporal — they can have start and end dates. Example: 'myapp uses PostgreSQL since 2025-01-01'.",
+    promptSnippet: "knowledge_add(subject, predicate, object, valid_from?, valid_to?, project?) — add a structured fact",
+    promptGuidelines: [
+      "Use when the user states a fact, makes a decision, or establishes a relationship",
+      "Subject and object are entities (people, tools, projects), predicate is the relationship",
+      "Set valid_from/valid_to for time-bounded facts (e.g., 'used React until 2025-06')",
+      "Common predicates: uses, depends_on, decided, prefers, created_by, replaces, implements",
+    ],
+    parameters: Type.Object({
+      subject: Type.String({ description: "The subject entity (e.g., 'myapp', 'Alice')" }),
+      predicate: Type.String({ description: "The relationship (e.g., 'uses', 'depends_on', 'decided')" }),
+      object: Type.String({ description: "The object entity (e.g., 'PostgreSQL', 'React')" }),
+      valid_from: Type.Optional(Type.String({ description: "When this fact became true (ISO date)" })),
+      valid_to: Type.Optional(Type.String({ description: "When this fact stopped being true (ISO date, null if still true)" })),
+      project: Type.Optional(Type.String({ description: "Project context for this fact" })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      const project = params.project || runtime.currentProject;
+      
+      try {
+        const result = runtime.store.addTriple({
+          subject: params.subject,
+          predicate: params.predicate,
+          object: params.object,
+          valid_from: params.valid_from,
+          valid_to: params.valid_to,
+          project,
+        });
+        
+        const timeInfo = params.valid_from ? ` (since ${params.valid_from})` : "";
+        return textResult(
+          `\u2705 Added fact: **${params.subject}** ${params.predicate} **${params.object}**${timeInfo}`,
+          { status: result.status, id: result.id }
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Failed to add fact: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- knowledge_query ---
+  pi.registerTool({
+    name: "knowledge_query",
+    label: "Knowledge Query",
+    description: "Query the knowledge graph for facts about an entity. Supports temporal queries — ask 'what was true about X in January 2025'.",
+    promptSnippet: "knowledge_query(entity, at_time?, project?) — query facts about an entity",
+    promptGuidelines: [
+      "Use when the user asks about relationships, decisions, or facts about an entity",
+      "Set at_time to query historical state (e.g., 'what database did we use in 2024?')",
+      "Returns all known facts — both as subject and object of relationships",
+    ],
+    parameters: Type.Object({
+      entity: Type.String({ description: "The entity to query (e.g., 'myapp', 'PostgreSQL')" }),
+      at_time: Type.Optional(Type.String({ description: "Query facts valid at this time (ISO date)" })),
+      project: Type.Optional(Type.String({ description: "Filter to a specific project" })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      
+      try {
+        const result = runtime.store.queryEntity(params.entity, {
+          at_time: params.at_time,
+          project: params.project,
+        });
+        
+        if (!result.entity) {
+          return textResult(`No entity found: "${params.entity}"`);
+        }
+        
+        let text = `## \uD83E\uDDE9 ${result.entity.name} (${result.entity.type})\n\n`;
+        
+        if (result.facts.length === 0) {
+          text += "No facts recorded.\n";
+        } else {
+          for (const fact of result.facts) {
+            const timeRange = [
+              fact.valid_from ? `from ${fact.valid_from}` : null,
+              fact.valid_to ? `until ${fact.valid_to}` : null,
+            ].filter(Boolean).join(" ");
+            const time = timeRange ? ` (${timeRange})` : "";
+            const confidence = fact.confidence < 1.0 ? ` [${(fact.confidence * 100).toFixed(0)}% confidence]` : "";
+            text += `- **${fact.subject}** ${fact.predicate} **${fact.object}**${time}${confidence}\n`;
+          }
+        }
+        
+        return textResult(text, { entity: result.entity.name, factCount: result.facts.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Knowledge query failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- knowledge_status ---
+  pi.registerTool({
+    name: "knowledge_status",
+    label: "Knowledge Status",
+    description: "Show knowledge graph statistics: entities, facts, predicates, and entity types.",
+    promptSnippet: "knowledge_status() — overview of the knowledge graph",
+    parameters: Type.Object({}),
+
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      
+      try {
+        const stats = runtime.store.knowledgeStats();
+        
+        let text = "## \uD83E\uDDE9 Knowledge Graph\n\n";
+        text += `- **Entities**: ${stats.entityCount}\n`;
+        text += `- **Total facts**: ${stats.tripleCount}\n`;
+        text += `- **Active facts**: ${stats.activeTriples} (no end date)\n\n`;
+        
+        if (Object.keys(stats.entityTypes).length > 0) {
+          text += "### Entity Types\n";
+          for (const [type, count] of Object.entries(stats.entityTypes)) {
+            text += `- ${type}: ${count}\n`;
+          }
+          text += "\n";
+        }
+        
+        if (Object.keys(stats.predicates).length > 0) {
+          text += "### Top Predicates\n";
+          for (const [pred, count] of Object.entries(stats.predicates)) {
+            text += `- ${pred}: ${count}\n`;
+          }
+        }
+        
+        return textResult(text, stats);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Knowledge status failed: ${msg}`);
+      }
+    },
     renderResult: renderTextResult,
   });
 
@@ -748,16 +1009,31 @@ export default function memoryExtension(pi: ExtensionAPI) {
           break;
         }
 
+        case "graph": {
+          pi.sendUserMessage("Show the palace graph with cross-project connections");
+          break;
+        }
+
+        case "knowledge": {
+          const entity = parts.slice(1).join(" ");
+          if (!entity) {
+            ctx.ui.notify("Usage: /memory knowledge <entity>", "warning");
+            break;
+          }
+          pi.sendUserMessage(`Query knowledge graph for: ${entity}`);
+          break;
+        }
+
         default: {
           ctx.ui.notify(
-            "Usage: /memory [status|stats|project <name>|search <query>|on|off]",
+            "Usage: /memory [status|stats|project <name>|search <query>|graph|knowledge <entity>|on|off]",
             "info"
           );
         }
       }
     },
     getArgumentCompletions: (prefix) => {
-      const commands = ["status", "stats", "project", "search", "on", "off"];
+      const commands = ["status", "stats", "project", "search", "graph", "knowledge", "on", "off"];
       return commands
         .filter((c) => c.startsWith(prefix))
         .map((c) => ({ label: c, value: c, type: "text" as const }));

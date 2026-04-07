@@ -12,6 +12,11 @@
  *   L2: On-Demand Project Context (filtered retrieval)
  *   L3: Deep Semantic Search (sqlite-vec vector search)
  *
+ * Additional features:
+ *   - Chunking: automatic 800/100 character chunking for large content
+ *   - Palace Graph / Tunnels: cross-project topic connections
+ *   - Knowledge Graph: temporal triples (entities + facts)
+ *
  * All operations are in-process — no subprocess spawning.
  */
 
@@ -37,6 +42,11 @@ const MEMORY_DIR = path.join(
 const IDENTITY_PATH = path.join(MEMORY_DIR, "identity.txt");
 const MODEL_NAME = "Xenova/all-MiniLM-L6-v2";
 const EMBEDDING_DIM = 384;
+
+// Chunking constants
+const CHUNK_SIZE = 800;      // characters per chunk
+const CHUNK_OVERLAP = 100;   // overlap between chunks
+const MIN_CHUNK_SIZE = 50;   // skip tiny fragments
 
 // ---------------------------------------------------------------------------
 // Types
@@ -117,6 +127,88 @@ export interface MemoryStats {
   storageSizeKb: number;
 }
 
+// Palace Graph / Tunnel types
+export interface TunnelInfo {
+  topic: string;
+  projects: [string, string];
+  memoryCounts: [number, number];
+}
+
+export interface PalaceNode {
+  name: string;
+  memoryCount: number;
+  topics: string[];
+}
+
+export interface PalaceEdge {
+  topic: string;
+  projectA: string;
+  projectB: string;
+  strength: number;
+}
+
+export interface PalaceGraph {
+  nodes: PalaceNode[];
+  edges: PalaceEdge[];
+}
+
+// Knowledge Graph types
+export interface EntityInput {
+  id?: string;
+  name: string;
+  entity_type?: string;
+  properties?: Record<string, unknown>;
+}
+
+export interface EntityResult {
+  status: "created" | "updated";
+  id: string;
+}
+
+export interface TripleInput {
+  subject: string;
+  predicate: string;
+  object: string;
+  valid_from?: string;
+  valid_to?: string;
+  confidence?: number;
+  source_memory_id?: string;
+  project?: string;
+}
+
+export interface TripleResult {
+  status: "created";
+  id: number;
+}
+
+export interface Fact {
+  subject: string;
+  predicate: string;
+  object: string;
+  valid_from: string | null;
+  valid_to: string | null;
+  confidence: number;
+  project: string;
+}
+
+export interface KnowledgeResult {
+  entity: {
+    id: string;
+    name: string;
+    type: string;
+    properties: Record<string, unknown>;
+  } | null;
+  facts: Fact[];
+}
+
+export interface KnowledgeStats {
+  entityCount: number;
+  tripleCount: number;
+  activeTriples: number;
+  entityTypes: Record<string, number>;
+  predicates: Record<string, number>;
+}
+
 // ---------------------------------------------------------------------------
 // Database row types
 // ---------------------------------------------------------------------------
@@ -132,6 +224,8 @@ interface MemoryRow {
   timestamp: string;
   session_id: string;
   importance: number;
+  chunk_index: number;
+  parent_id: string | null;
 }
 
 interface VecSearchRow {
@@ -196,6 +290,41 @@ function contentHash(content: string): string {
     .update(content, "utf-8")
     .digest("hex")
     .slice(0, 16);
+}
+
+// ---------------------------------------------------------------------------
+// Chunking
+// ---------------------------------------------------------------------------
+
+function chunkText(content: string): string[] {
+  if (content.length <= CHUNK_SIZE) return [content];
+
+  const chunks: string[] = [];
+  let offset = 0;
+
+  while (offset < content.length) {
+    let end = Math.min(offset + CHUNK_SIZE, content.length);
+
+    // Try to break on paragraph boundary
+    if (end < content.length) {
+      const paraBreak = content.lastIndexOf("\n\n", end);
+      if (paraBreak > offset + CHUNK_SIZE / 2) end = paraBreak;
+      else {
+        const lineBreak = content.lastIndexOf("\n", end);
+        if (lineBreak > offset + CHUNK_SIZE / 2) end = lineBreak;
+      }
+    }
+
+    const chunk = content.slice(offset, end).trim();
+    if (chunk.length >= MIN_CHUNK_SIZE) chunks.push(chunk);
+
+    offset = end - CHUNK_OVERLAP;
+    if (offset >= content.length) break;
+    // Prevent infinite loop
+    if (end === offset + CHUNK_OVERLAP) offset = end;
+  }
+
+  return chunks.length > 0 ? chunks : [content];
 }
 
 // ---------------------------------------------------------------------------
@@ -276,12 +405,77 @@ export class MemoryStore {
         source TEXT NOT NULL DEFAULT 'auto-capture',
         timestamp TEXT NOT NULL,
         session_id TEXT NOT NULL DEFAULT '',
-        importance REAL DEFAULT 0.5
+        importance REAL DEFAULT 0.5,
+        chunk_index INTEGER DEFAULT 0,
+        parent_id TEXT DEFAULT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
       CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic);
       CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp);
       CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
+    `);
+
+    // Migrate existing databases: add chunk_index and parent_id columns
+    try {
+      this.db.exec(
+        `ALTER TABLE memories ADD COLUMN chunk_index INTEGER DEFAULT 0`
+      );
+    } catch {
+      /* column already exists */
+    }
+    try {
+      this.db.exec(
+        `ALTER TABLE memories ADD COLUMN parent_id TEXT DEFAULT NULL`
+      );
+    } catch {
+      /* column already exists */
+    }
+
+    // Tunnels table for Palace Graph
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS tunnels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT NOT NULL,
+        project_a TEXT NOT NULL,
+        project_b TEXT NOT NULL,
+        memory_count INTEGER DEFAULT 0,
+        last_updated TEXT NOT NULL,
+        UNIQUE(topic, project_a, project_b)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tunnels_topic ON tunnels(topic);
+    `);
+
+    // Knowledge Graph tables
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS entities (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        entity_type TEXT DEFAULT 'unknown',
+        properties TEXT DEFAULT '{}',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+      CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+
+      CREATE TABLE IF NOT EXISTS triples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject TEXT NOT NULL,
+        predicate TEXT NOT NULL,
+        object TEXT NOT NULL,
+        valid_from TEXT,
+        valid_to TEXT,
+        confidence REAL DEFAULT 1.0,
+        source_memory_id TEXT,
+        project TEXT DEFAULT 'general',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (subject) REFERENCES entities(id),
+        FOREIGN KEY (object) REFERENCES entities(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
+      CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
+      CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
+      CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
+      CREATE INDEX IF NOT EXISTS idx_triples_project ON triples(project);
     `);
 
     // sqlite-vec virtual table — created separately since CREATE VIRTUAL TABLE
@@ -299,8 +493,8 @@ export class MemoryStore {
 
     // Prepare statements
     this.stmtInsertMemory = this.db.prepare(`
-      INSERT INTO memories (id, content, content_hash, project, topic, source, timestamp, session_id, importance)
-      VALUES (@id, @content, @content_hash, @project, @topic, @source, @timestamp, @session_id, @importance)
+      INSERT INTO memories (id, content, content_hash, project, topic, source, timestamp, session_id, importance, chunk_index, parent_id)
+      VALUES (@id, @content, @content_hash, @project, @topic, @source, @timestamp, @session_id, @importance, @chunk_index, @parent_id)
     `);
 
     this.stmtInsertVec = this.db.prepare(`
@@ -366,7 +560,9 @@ export class MemoryStore {
     timestamp: string,
     sessionId: string,
     importance: number,
-    embedding: Float32Array
+    embedding: Float32Array,
+    chunkIndex: number = 0,
+    parentId: string | null = null
   ): number {
     const insertBoth = this.db.transaction(() => {
       const info = this.stmtInsertMemory.run({
@@ -379,6 +575,8 @@ export class MemoryStore {
         timestamp,
         session_id: sessionId,
         importance,
+        chunk_index: chunkIndex,
+        parent_id: parentId,
       });
       const rowid = Number(info.lastInsertRowid);
       this.stmtInsertVec.run(BigInt(rowid), embedding);
@@ -469,33 +667,91 @@ export class MemoryStore {
       throw new Error("Empty content");
     }
 
-    const cHash = contentHash(content);
-    const docId = `mem_${cHash}`;
+    const project = input.project || "general";
+    const topic = input.topic || "general";
+    const source = input.source || "auto-capture";
+    const timestamp = input.timestamp || new Date().toISOString();
+    const sessionId = input.session_id || "";
+    const importance = input.importance ?? 0.5;
 
-    // Check for duplicate
-    if (this.stmtFindByHash.get(cHash)) {
-      return { status: "duplicate", id: docId };
+    const chunks = chunkText(content);
+
+    // Short content: behave exactly as before (no chunking)
+    if (chunks.length === 1) {
+      const cHash = contentHash(content);
+      const docId = `mem_${cHash}`;
+
+      // Check for duplicate
+      if (this.stmtFindByHash.get(cHash)) {
+        return { status: "duplicate", id: docId };
+      }
+
+      const vec = await embed(content);
+
+      this.insertMemoryAndVec(
+        docId,
+        content,
+        cHash,
+        project,
+        topic,
+        source,
+        timestamp,
+        sessionId,
+        importance,
+        vec,
+        0,    // chunk_index
+        null  // parent_id
+      );
+
+      // Invalidate L1 cache when new memory is stored
+      this.cachedL1 = null;
+
+      return { status: "stored", id: docId };
     }
 
-    const vec = await embed(content);
+    // Multi-chunk: each chunk gets its own id, embedding, and row
+    const baseHash = contentHash(content);
+    const parentId = `mem_${baseHash}_c0`;
+    let storedAny = false;
 
-    this.insertMemoryAndVec(
-      docId,
-      content,
-      cHash,
-      input.project || "general",
-      input.topic || "general",
-      input.source || "auto-capture",
-      input.timestamp || new Date().toISOString(),
-      input.session_id || "",
-      input.importance ?? 0.5,
-      vec
-    );
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const chunkHash = contentHash(chunk);
+      const chunkId = `mem_${baseHash}_c${i}`;
+
+      // Skip duplicate chunks
+      if (this.stmtFindByHash.get(chunkHash)) continue;
+
+      const vec = await embed(chunk);
+
+      try {
+        this.insertMemoryAndVec(
+          chunkId,
+          chunk,
+          chunkHash,
+          project,
+          topic,
+          source,
+          timestamp,
+          sessionId,
+          importance,
+          vec,
+          i,
+          i === 0 ? null : parentId
+        );
+        storedAny = true;
+      } catch {
+        // Skip duplicates or other insertion errors
+      }
+    }
 
     // Invalidate L1 cache when new memory is stored
     this.cachedL1 = null;
 
-    return { status: "stored", id: docId };
+    return {
+      status: storedAny ? "stored" : "duplicate",
+      id: parentId,
+    };
   }
 
   async batchStore(items: StoreInput[]): Promise<BatchStoreResult> {
@@ -933,6 +1189,381 @@ export class MemoryStore {
       timeline,
       avgContentLength: Math.round(avgLen || 0),
       storageSizeKb,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Palace Graph / Tunnels
+  // -----------------------------------------------------------------------
+
+  /**
+   * Discover tunnels: topics that appear in multiple projects.
+   * A tunnel connects two projects that share the same topic.
+   */
+  discoverTunnels(): TunnelInfo[] {
+    this.ensureLoaded();
+
+    // Find topics shared across 2+ projects
+    const rows = this.db
+      .prepare(
+        `SELECT topic, project, COUNT(*) as cnt
+         FROM memories
+         WHERE topic != 'general'
+         GROUP BY topic, project
+         HAVING cnt >= 1`
+      )
+      .all() as { topic: string; project: string; cnt: number }[];
+
+    // Group by topic
+    const topicProjects: Record<
+      string,
+      { project: string; count: number }[]
+    > = {};
+    for (const row of rows) {
+      if (!topicProjects[row.topic]) topicProjects[row.topic] = [];
+      topicProjects[row.topic].push({ project: row.project, count: row.cnt });
+    }
+
+    // Build tunnel list (topics with 2+ projects)
+    const tunnels: TunnelInfo[] = [];
+    for (const [topic, projects] of Object.entries(topicProjects)) {
+      if (projects.length < 2) continue;
+
+      // Create pairwise tunnels
+      for (let i = 0; i < projects.length; i++) {
+        for (let j = i + 1; j < projects.length; j++) {
+          const [a, b] = [projects[i], projects[j]].sort((x, y) =>
+            x.project.localeCompare(y.project)
+          );
+          tunnels.push({
+            topic,
+            projects: [a.project, b.project],
+            memoryCounts: [a.count, b.count],
+          });
+        }
+      }
+    }
+
+    return tunnels;
+  }
+
+  /**
+   * Get the palace graph: projects as nodes, tunnels as edges.
+   */
+  getPalaceGraph(): PalaceGraph {
+    this.ensureLoaded();
+
+    const projects = this.countByProject();
+    const tunnels = this.discoverTunnels();
+
+    const nodes: PalaceNode[] = Object.entries(projects).map(
+      ([name, count]) => ({
+        name,
+        memoryCount: count,
+        topics: this.getProjectTopics(name),
+      })
+    );
+
+    const edges: PalaceEdge[] = tunnels.map((t) => ({
+      topic: t.topic,
+      projectA: t.projects[0],
+      projectB: t.projects[1],
+      strength: t.memoryCounts[0] + t.memoryCounts[1],
+    }));
+
+    return { nodes, edges };
+  }
+
+  /**
+   * Traverse a tunnel: find memories in both projects for a shared topic.
+   */
+  traverseTunnel(
+    topic: string,
+    projectA: string,
+    projectB: string,
+    n_results?: number
+  ): SearchResult[] {
+    this.ensureLoaded();
+    const limit = Math.min(n_results || 10, 50);
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, content, project, topic, source, timestamp
+         FROM memories
+         WHERE topic = ? AND project IN (?, ?)
+         ORDER BY timestamp DESC
+         LIMIT ?`
+      )
+      .all(topic, projectA, projectB, limit) as MemoryRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      text: row.content,
+      project: row.project,
+      topic: row.topic,
+      source: row.source,
+      timestamp: row.timestamp,
+      similarity: 0,
+    }));
+  }
+
+  /** Helper: get distinct non-general topics for a project. */
+  private getProjectTopics(project: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT topic FROM memories WHERE project = ? AND topic != 'general'`
+      )
+      .all(project) as { topic: string }[];
+    return rows.map((r) => r.topic);
+  }
+
+  // -----------------------------------------------------------------------
+  // Knowledge Graph
+  // -----------------------------------------------------------------------
+
+  /**
+   * Add or update an entity in the knowledge graph.
+   */
+  addEntity(input: EntityInput): EntityResult {
+    this.ensureLoaded();
+
+    const id =
+      input.id || `ent_${contentHash(input.name.toLowerCase())}`;
+    const existing = this.db
+      .prepare("SELECT id FROM entities WHERE id = ?")
+      .get(id) as { id: string } | undefined;
+
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE entities SET name = ?, entity_type = ?, properties = ? WHERE id = ?`
+        )
+        .run(
+          input.name,
+          input.entity_type || "unknown",
+          JSON.stringify(input.properties || {}),
+          id
+        );
+      return { status: "updated", id };
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO entities (id, name, entity_type, properties, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.name,
+        input.entity_type || "unknown",
+        JSON.stringify(input.properties || {}),
+        new Date().toISOString()
+      );
+
+    return { status: "created", id };
+  }
+
+  /**
+   * Add a temporal triple (fact) to the knowledge graph.
+   */
+  addTriple(input: TripleInput): TripleResult {
+    this.ensureLoaded();
+
+    // Auto-create entities if they don't exist
+    this.addEntity({
+      name: input.subject,
+      id: `ent_${contentHash(input.subject.toLowerCase())}`,
+    });
+    this.addEntity({
+      name: input.object,
+      id: `ent_${contentHash(input.object.toLowerCase())}`,
+    });
+
+    const subjectId = `ent_${contentHash(input.subject.toLowerCase())}`;
+    const objectId = `ent_${contentHash(input.object.toLowerCase())}`;
+
+    const info = this.db
+      .prepare(
+        `INSERT INTO triples (subject, predicate, object, valid_from, valid_to, confidence, source_memory_id, project, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        subjectId,
+        input.predicate,
+        objectId,
+        input.valid_from || null,
+        input.valid_to || null,
+        input.confidence ?? 1.0,
+        input.source_memory_id || null,
+        input.project || "general",
+        new Date().toISOString()
+      );
+
+    return { status: "created", id: Number(info.lastInsertRowid) };
+  }
+
+  /**
+   * Query the knowledge graph for facts about an entity.
+   * Supports temporal filtering: only returns facts valid at a given point in time.
+   */
+  queryEntity(
+    name: string,
+    options?: { at_time?: string; project?: string }
+  ): KnowledgeResult {
+    this.ensureLoaded();
+
+    const entityId = `ent_${contentHash(name.toLowerCase())}`;
+    const entity = this.db
+      .prepare("SELECT * FROM entities WHERE id = ?")
+      .get(entityId) as any;
+
+    if (!entity) return { entity: null, facts: [] };
+
+    let query = `
+      SELECT t.*,
+        s.name as subject_name, s.entity_type as subject_type,
+        o.name as object_name, o.entity_type as object_type
+      FROM triples t
+      JOIN entities s ON t.subject = s.id
+      JOIN entities o ON t.object = o.id
+      WHERE (t.subject = ? OR t.object = ?)
+    `;
+    const params: any[] = [entityId, entityId];
+
+    if (options?.at_time) {
+      query += ` AND (t.valid_from IS NULL OR t.valid_from <= ?)
+                 AND (t.valid_to IS NULL OR t.valid_to >= ?)`;
+      params.push(options.at_time, options.at_time);
+    }
+
+    if (options?.project) {
+      query += ` AND t.project = ?`;
+      params.push(options.project);
+    }
+
+    query += ` ORDER BY t.created_at DESC`;
+
+    const rows = this.db.prepare(query).all(...params) as any[];
+
+    const facts: Fact[] = rows.map((r) => ({
+      subject: r.subject_name,
+      predicate: r.predicate,
+      object: r.object_name,
+      valid_from: r.valid_from,
+      valid_to: r.valid_to,
+      confidence: r.confidence,
+      project: r.project,
+    }));
+
+    return {
+      entity: {
+        id: entity.id,
+        name: entity.name,
+        type: entity.entity_type,
+        properties: JSON.parse(entity.properties || "{}"),
+      },
+      facts,
+    };
+  }
+
+  /**
+   * Query triples by predicate (e.g., "uses", "depends_on", "decided").
+   */
+  queryByPredicate(
+    predicate: string,
+    options?: { project?: string; at_time?: string }
+  ): Fact[] {
+    this.ensureLoaded();
+
+    let query = `
+      SELECT t.*,
+        s.name as subject_name,
+        o.name as object_name
+      FROM triples t
+      JOIN entities s ON t.subject = s.id
+      JOIN entities o ON t.object = o.id
+      WHERE t.predicate = ?
+    `;
+    const params: any[] = [predicate];
+
+    if (options?.at_time) {
+      query += ` AND (t.valid_from IS NULL OR t.valid_from <= ?)
+                 AND (t.valid_to IS NULL OR t.valid_to >= ?)`;
+      params.push(options.at_time, options.at_time);
+    }
+
+    if (options?.project) {
+      query += ` AND t.project = ?`;
+      params.push(options.project);
+    }
+
+    query += ` ORDER BY t.created_at DESC`;
+
+    const rows = this.db.prepare(query).all(...params) as any[];
+
+    return rows.map((r) => ({
+      subject: r.subject_name,
+      predicate: r.predicate,
+      object: r.object_name,
+      valid_from: r.valid_from,
+      valid_to: r.valid_to,
+      confidence: r.confidence,
+      project: r.project,
+    }));
+  }
+
+  /**
+   * Invalidate a fact by setting valid_to.
+   */
+  invalidateTriple(tripleId: number, valid_to?: string): void {
+    this.ensureLoaded();
+    this.db
+      .prepare(`UPDATE triples SET valid_to = ? WHERE id = ?`)
+      .run(valid_to || new Date().toISOString(), tripleId);
+  }
+
+  /**
+   * Get knowledge graph stats.
+   */
+  knowledgeStats(): KnowledgeStats {
+    this.ensureLoaded();
+
+    const entityCount = (
+      this.db.prepare("SELECT COUNT(*) as cnt FROM entities").get() as any
+    ).cnt;
+    const tripleCount = (
+      this.db.prepare("SELECT COUNT(*) as cnt FROM triples").get() as any
+    ).cnt;
+    const activeTriples = (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM triples WHERE valid_to IS NULL"
+        )
+        .get() as any
+    ).cnt;
+
+    const entityTypes: Record<string, number> = {};
+    const typeRows = this.db
+      .prepare(
+        "SELECT entity_type, COUNT(*) as cnt FROM entities GROUP BY entity_type"
+      )
+      .all() as any[];
+    for (const r of typeRows) entityTypes[r.entity_type] = r.cnt;
+
+    const predicates: Record<string, number> = {};
+    const predRows = this.db
+      .prepare(
+        "SELECT predicate, COUNT(*) as cnt FROM triples GROUP BY predicate ORDER BY cnt DESC LIMIT 20"
+      )
+      .all() as any[];
+    for (const r of predRows) predicates[r.predicate] = r.cnt;
+
+    return {
+      entityCount,
+      tripleCount,
+      activeTriples,
+      entityTypes,
+      predicates,
     };
   }
 
