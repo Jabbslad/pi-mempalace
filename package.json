@@ -7,6 +7,15 @@
     "pi-package"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jabbslad/pi-mempalace.git"
+  },
+  "files": [
+    "extensions/",
+    "skills/",
+    "README.md"
+  ],
   "pi": {
     "extensions": [
       "./extensions"
