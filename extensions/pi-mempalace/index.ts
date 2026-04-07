@@ -530,6 +530,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
       topic: Type.Optional(
         Type.String({ description: "Topic category (e.g., 'auth', 'database', 'architecture')" })
       ),
+      importance: Type.Optional(
+        Type.Number({ description: "Importance weight 0.0-1.0 (default: 0.8 for manual saves). Higher = more likely to appear in session wake-up context." })
+      ),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -542,6 +545,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           project,
           topic: params.topic || "general",
           source: "manual-save",
+          importance: params.importance ?? 0.8, // Manual saves rank higher than auto-captures (0.5)
           timestamp: new Date().toISOString(),
           session_id: getSessionKey(ctx),
         });
