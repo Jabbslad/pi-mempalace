@@ -221,6 +221,50 @@ If you want the full palace experience with all its wings and halls and drawers,
 
 ---
 
+## 📊 Benchmark Validation
+
+We reproduce [LongMemEval](https://arxiv.org/abs/2410.10813) — the standard benchmark for AI memory systems — to validate that our implementation matches MemPalace's retrieval quality. The benchmark stores 500 questions, each with ~50 timestamped conversation sessions, and measures whether the correct session appears in the top-K search results.
+
+### Results (Raw Mode — Zero API, Fully Local)
+
+| Metric | pi-mempalace | MemPalace (reference) | Delta |
+|--------|-------------|----------------------|-------|
+| **Recall@5** | **95.8%** (479/500) | 96.6% (483/500) | -0.8pp |
+| **Recall@10** | **98.2%** (491/500) | 98.2% (491/500) | **identical** |
+| **NDCG@10** | **0.884** | 0.889 | -0.005 |
+
+### Per Question Type
+
+| Question Type | R@5 | R@10 | Questions |
+|--------------|-----|------|-----------|
+| knowledge-update | 🟢 100% | 100% | 78 |
+| multi-session | 🟢 97.7% | 98.5% | 133 |
+| temporal-reasoning | 🟡 94.7% | 99.2% | 133 |
+| single-session-assistant | 🟡 94.6% | 96.4% | 56 |
+| single-session-user | 🟡 92.9% | 95.7% | 70 |
+| single-session-preference | 🟡 90.0% | 96.7% | 30 |
+
+The 0.8pp R@5 gap comes from our 800-char chunking (MemPalace stores whole sessions in benchmark mode) and minor differences between sqlite-vec and ChromaDB's HNSW implementations. The weakest categories (temporal, preference) are exactly what MemPalace's hybrid modes address with keyword re-ranking and temporal boosting — features we haven't implemented.
+
+### Run It Yourself
+
+```bash
+# Download the LongMemEval dataset (~277MB)
+curl -fsSL -o benchmarks/data/longmemeval_s_cleaned.json \
+  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+
+# Run full benchmark (500 questions, ~4 minutes)
+npx tsx benchmarks/longmemeval_bench.mjs
+
+# Quick smoke test (10 questions, ~5 seconds)
+npx tsx benchmarks/longmemeval_bench.mjs --limit 10
+
+# Save per-question results
+npx tsx benchmarks/longmemeval_bench.mjs --out benchmarks/results/raw_500.jsonl
+```
+
+---
+
 ## 🤔 Why Not Just Use MemPalace Directly?
 
 You absolutely could! MemPalace is great. But if you're already living in the pi ecosystem:
