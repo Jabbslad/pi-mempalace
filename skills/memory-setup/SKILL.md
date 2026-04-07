@@ -5,15 +5,13 @@ description: Set up persistent agent memory. Configures identity, checks depende
 
 # Memory Setup
 
-Set up pi-memory for persistent agent memory across sessions.
+Set up pi-mempalace for persistent agent memory across sessions.
 
 ## Prerequisites
 
-Check these before starting:
+No external dependencies required. Everything runs in Node.js via `@huggingface/transformers`.
 
-1. **Python 3.9+**: Run `python3 --version`
-2. **chromadb**: Run `python3 -c "import chromadb; print(chromadb.__version__)"`
-   - If missing: `pip3 install 'chromadb>=0.4.0,<1'`
+The first operation that needs embeddings (search or store) will download the all-MiniLM-L6-v2 model (~90MB, cached automatically).
 
 ## Setup Steps
 
@@ -57,7 +55,7 @@ Use `/memory project <name>` to set the current project context.
 Run the `memory_status` tool to confirm everything is working:
 - Identity should show ✅
 - Total memories should be 0 (fresh install)
-- Backend should be reachable
+- Backend should show "pure TypeScript (in-process)"
 
 ### 5. Optional: Import existing conversations
 
@@ -72,7 +70,7 @@ If the user has exported conversations (from Claude, ChatGPT, etc.), help them s
 
 Once set up, memory works automatically:
 
-- **Auto-capture**: Every conversation turn is buffered and stored on session end
+- **Auto-capture**: Every conversation turn is embedded and stored directly (no buffering)
 - **Wake-up**: Each new session starts with your identity + recent context (~600-900 tokens)
 - **Search**: Use `memory_search` to find past conversations by meaning
 - **Save**: Use `memory_save` to explicitly remember important decisions
@@ -87,15 +85,13 @@ Config is stored at `~/.pi/agent/memory/config.json`:
   "autoCapture": true,
   "wakeUpEnabled": true,
   "wakeUpMaxTokens": 800,
-  "defaultProject": null,
-  "pythonPath": "python3"
+  "defaultProject": null
 }
 ```
 
 ## Commands
 
 - `/memory status` — show memory overview
-- `/memory flush` — force-flush buffered exchanges to storage
 - `/memory project <name>` — set current project
 - `/memory on` / `/memory off` — enable/disable memory
 - `/memory search <query>` — quick search

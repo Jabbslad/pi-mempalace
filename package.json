@@ -1,5 +1,5 @@
 {
-  "name": "pi-memory",
+  "name": "pi-mempalace",
   "version": "0.1.0",
   "type": "module",
   "description": "Persistent agent memory for pi — raw verbatim storage with semantic search. Never lose context again.",
@@ -14,6 +14,9 @@
     "skills": [
       "./skills"
     ]
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.0.1"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",

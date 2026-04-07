@@ -1,85 +1,171 @@
-# pi-memory
+# 🧠 pi-mempalace
 
-Persistent agent memory for [pi](https://github.com/badlogic/pi-mono). Never lose context again.
+**Your AI forgot everything again. How delightful.**
 
-Every conversation you have with an AI — every decision, every debugging session, every architecture debate — disappears when the session ends. pi-memory stores your exchanges verbatim and makes them searchable across sessions using semantic similarity.
+Every conversation you've ever had with an AI — every architectural decision, every late-night debugging eureka, every "let's use Postgres because..." — *poof*. Gone the moment you close the tab. Your AI has the long-term memory of a goldfish at a rave.
 
-## How it works
+**pi-mempalace fixes that.** It gives [pi](https://github.com/badlogic/pi-mono) agents persistent, cross-session memory. Store everything. Search it later. Never re-explain your life choices to a machine again.
 
-**Store everything, search it later.** No LLM summarization, no lossy extraction. Raw verbatim text + local embeddings (all-MiniLM-L6-v2 via ChromaDB) = high-accuracy retrieval at zero API cost.
+---
 
-- **Auto-capture**: Conversation exchanges are buffered during sessions and stored on shutdown
-- **Wake-up context**: Each new session starts with your identity + recent memories (~600-900 tokens)
-- **Semantic search**: Find past decisions by meaning, not just keywords
-- **Project-aware**: Memories are tagged by project (auto-detected from directory) and topic
-- **Fully local**: ChromaDB runs locally, embeddings computed locally, no cloud dependency
+## 🏰 Standing on the Shoulders of a Memory Palace
 
-## Install
+This project is directly inspired by the wonderful [MemPalace](https://www.mempalace.tech) — built by **Milla Jovovich** (yes, *that* Milla Jovovich — Leeloo from *The Fifth Element*, Alice from *Resident Evil*) and developer **Ben Sigman**.
+
+Milla's origin story is painfully relatable: after thousands of conversations with AI, she realized every new session was a clean slate. All her decisions, reasoning, creative ideas — thrown into the void. Existing memory tools like Mem0 and Zep tried to help, but they had a fatal flaw: they used AI to decide what was worth remembering. The nuance, the "why," the reasoning behind decisions — exactly the stuff that matters — was the first to go.
+
+So Milla and Ben spent months building MemPalace with Claude Code, and landed on a beautifully simple idea:
+
+> **Don't let AI decide what to forget — store everything, then make it findable.**
+
+Their MemPalace scored **96.6% on LongMemEval** (the standard benchmark for AI memory) in raw mode — the highest published result requiring zero API calls. The full system hit 100% with hybrid reranking, sparking a [glorious internet debate](https://www.mempalace.tech) about benchmarks and bragging rights. 7,000+ GitHub stars in 48 hours. Not bad for an actress and a developer with an idea.
+
+pi-mempalace takes that core philosophy — **verbatim storage + semantic search** — and reimagines it as a native [pi](https://github.com/badlogic/pi-mono) extension. No Python. No ChromaDB. No pip install nightmares. Just pure TypeScript running in-process, fast enough to forget that forgetting was ever a problem.
+
+---
+
+## ✨ What It Does
+
+- **🔄 Auto-capture** — Every conversation exchange is stored automatically after each turn. You don't have to remember to remember.
+- **🌅 Wake-up context** — Each new session starts with a whisper of who you are and what you've been up to (~600-900 tokens of "previously on your life").
+- **🔍 Semantic search** — Find past decisions by *meaning*, not keywords. "Why did we pick that database?" just works.
+- **📁 Project-aware** — Memories are tagged by project (auto-detected from your directory) and topic. Your work stays organized even if you don't.
+- **🏠 Fully local** — Embeddings computed in-process via `all-MiniLM-L6-v2`. No cloud calls. No API keys. No surveillance capitalism. Just you and your memories.
+- **📊 Beautiful stats** — Sparkline activity charts, bar graphs by project/topic, and a TUI overlay that makes you feel like a hacker in a 90s movie.
+
+---
+
+## 🚀 Install
 
 ```bash
-# Install chromadb (the only dependency)
-pip3 install 'chromadb>=0.4.0,<1'
-
-# Install the pi extension
-pi install /path/to/pi-memory
-# or
-pi install git:github.com/your-username/pi-memory
+# Install the pi extension — everything is npm packages, no Python required
+pi install /path/to/pi-mempalace
 ```
 
-## Quick Start
+That's it. No conda environments. No Docker containers. No sacrificial offerings to the dependency gods.
+
+---
+
+## 🎮 Quick Start
 
 ```bash
-# Set up identity and verify
+# Set up your identity and verify everything works
 /skill:memory-setup
 
-# Save something important
+# Explicitly save something important
 memory_save("We chose PostgreSQL for concurrent write support", project: "myapp", topic: "database")
 
-# Search later
+# Search later, when you've inevitably forgotten
 memory_search("why did we pick the database?")
 
-# Browse a project's memories
+# Browse a project's collected wisdom
 memory_recall(project: "myapp")
+
+# Check on your growing brain
+memory_status()
 ```
 
-## Tools
+---
 
-| Tool | Purpose |
-|------|---------|
-| `memory_search` | Semantic search across all stored memories |
-| `memory_save` | Explicitly save important information |
-| `memory_recall` | Browse memories by project/topic |
-| `memory_status` | Show memory store overview |
+## 🧰 Tools
 
-## Commands
+| Tool | What It Does |
+|------|-------------|
+| `memory_search` | Semantic search across all stored memories — find things by meaning |
+| `memory_save` | Explicitly save important info — for those "remember this" moments |
+| `memory_recall` | Browse memories by project/topic — like flipping through a journal |
+| `memory_status` | Memory store overview — how big is your brain now? |
 
-| Command | Purpose |
-|---------|---------|
+## ⌨️ Commands
+
+| Command | What It Does |
+|---------|-------------|
 | `/memory status` | Quick status overview |
-| `/memory flush` | Force-flush buffered exchanges |
+| `/memory stats` | Full stats overlay with sparklines and bar charts |
 | `/memory project <name>` | Set current project context |
-| `/memory search <query>` | Quick search |
-| `/memory on` / `off` | Enable/disable memory |
+| `/memory search <query>` | Quick search shortcut |
+| `/memory on` / `off` | Enable/disable memory (for those private moments) |
 
-## Architecture
+---
+
+## 🏗️ Architecture
 
 ```
-pi (TypeScript extension)          Python backend (ChromaDB)
-┌─────────────────────┐           ┌──────────────────────┐
-│ turn_end → buffer    │           │ memory_backend.py     │
-│ session_end → flush  │──JSON──→ │                        │
-│ before_agent_start   │           │ store / search /       │
-│   → inject wake-up   │←──JSON──│ wakeup / status         │
-│ Tools: search/save/  │           │                        │
-│   recall/status      │           │ ChromaDB + MiniLM      │
-│ Widget: 🧠 N memories│           │ ~/.pi/agent/memory/    │
-└─────────────────────┘           └──────────────────────┘
+pi (TypeScript — everything in-process, beautifully simple)
+┌──────────────────────────────────────────────┐
+│  extensions/pi-mempalace/                    │
+│                                              │
+│  index.ts              memory_store.ts       │
+│  ┌──────────────────┐  ┌──────────────────┐  │
+│  │ turn_end →        │  │ MemoryStore      │  │
+│  │   auto-capture    │──│                  │  │
+│  │ before_agent →    │  │ embed (~4ms)     │  │
+│  │   wake-up inject  │←─│ search (~5ms)    │  │
+│  │ Tools + Commands  │  │ store + recall   │  │
+│  │ Stats TUI overlay │  │                  │  │
+│  └──────────────────┘  │ JSONL + cosine    │  │
+│                         │ ~/.pi/agent/      │  │
+│                         │   memory/         │  │
+│                         └──────────────────┘  │
+│                                              │
+│  @huggingface/transformers                   │
+│    all-MiniLM-L6-v2 (384 dimensions)         │
+└──────────────────────────────────────────────┘
 ```
 
-## Inspired by
+### ⚡ Performance
 
-[mempalace](https://github.com/your-username/mempalace) — which demonstrated that raw verbatim storage + semantic search achieves 96.6% retrieval accuracy on LongMemEval, beating LLM-based extraction approaches.
+| Operation | Time | Vibes |
+|-----------|------|-------|
+| Model load (once per session) | ~660ms | ☕ Sip of coffee |
+| Embed text | ~4ms | ⚡ Blink and you'll miss it |
+| Search 1,000 memories | ~5ms | 🚀 Faster than you can forget |
+| Store 1 memory | ~4ms | 💾 Practically instant |
 
-## License
+### 💾 Storage
 
-MIT
+Memories live as JSONL at `~/.pi/agent/memory/memories.jsonl`. Each line is a self-contained memory: text, metadata, and a pre-computed embedding vector (base64-encoded Float32Array). Deduplication via SHA-256 hash means you can't accidentally remember the same thing twice — unlike that embarrassing story you keep retelling at parties.
+
+---
+
+## 🎭 The MemPalace Lineage
+
+The original [MemPalace](https://www.mempalace.tech) uses a gorgeous metaphorical architecture — **Wings** (top-level containers), **Rooms** (topics), **Halls** (corridors by memory type), **Closets** (compressed summaries), and **Drawers** (verbatim source files). It runs on Python with ChromaDB and includes AAAK, a custom 30x compression dialect that any LLM can read natively.
+
+pi-mempalace takes the same philosophical core — *store everything verbatim, search semantically* — and translates it into the pi ecosystem as a lightweight TypeScript extension. We traded the palace metaphor for raw speed and zero-dependency simplicity, but the soul is the same: **your AI should remember you.**
+
+If you want the full palace experience with all its wings and halls and drawers, go check out [mempalace.tech](https://www.mempalace.tech). Milla and Ben built something special.
+
+---
+
+## 🤔 Why Not Just Use MemPalace Directly?
+
+You absolutely could! MemPalace is great. But if you're already living in the pi ecosystem:
+
+- **No Python required** — pi-mempalace is pure TypeScript, runs in-process
+- **Native pi integration** — hooks into pi's extension system, session lifecycle, and TUI
+- **Auto-capture built in** — no manual memory management needed
+- **Wake-up context** — your agent remembers you before you even ask
+- **Zero config** — install it and go. It just works.
+
+---
+
+## 📜 License
+
+MIT — because memories should be free.
+
+---
+
+<p align="center">
+  <i>
+    "I wanted my AI to remember the way I remember — not just the conclusions, but the journey."
+    <br/>
+    — The philosophy behind MemPalace, which inspired this project
+  </i>
+</p>
+
+<p align="center">
+  🏰 Inspired by <a href="https://www.mempalace.tech">MemPalace</a> by Milla Jovovich & Ben Sigman
+  <br/>
+  🧠 Built for <a href="https://github.com/badlogic/pi-mono">pi</a> with ❤️ and a fear of forgetting
+</p>

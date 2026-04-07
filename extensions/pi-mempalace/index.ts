@@ -1,5 +1,5 @@
 /**
- * pi-memory — Persistent Agent Memory Extension
+ * pi-mempalace — Persistent Agent Memory Extension
  *
  * Raw verbatim storage of conversation exchanges with semantic search.
  * Never lose context again.
@@ -18,13 +18,15 @@
 import type {
   ExtensionAPI,
   ExtensionContext,
-  Theme,
 } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import { Container, Spacer, Text } from "@mariozechner/pi-tui";
+import type { MemoryStats } from "./memory_store.js";
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+
+import { MemoryStore } from "./memory_store.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -36,13 +38,7 @@ const MEMORY_DIR = path.join(
   "agent",
   "memory"
 );
-const CAPTURE_BUFFER_PATH = path.join(MEMORY_DIR, "capture_buffer.jsonl");
 const CONFIG_PATH = path.join(MEMORY_DIR, "config.json");
-const IDENTITY_PATH = path.join(MEMORY_DIR, "identity.txt");
-
-// Resolve the scripts directory relative to this extension file
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BACKEND_SCRIPT = path.resolve(__dirname, "../../scripts/memory_backend.py");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,15 +53,11 @@ interface MemoryConfig {
   wakeUpMaxTokens: number;
   /** Default project name (auto-detected from cwd if not set) */
   defaultProject: string | null;
-  /** Python executable path */
-  pythonPath: string;
 }
 
 interface MemoryRuntime {
   /** Current configuration */
   config: MemoryConfig;
-  /** Buffered exchanges waiting to be flushed */
-  bufferCount: number;
   /** Total memories in store (cached) */
   totalMemories: number;
   /** Per-project counts (cached) */
@@ -78,15 +70,8 @@ interface MemoryRuntime {
   currentProject: string;
   /** Whether memory mode is enabled */
   enabled: boolean;
-}
-
-interface BufferedExchange {
-  content: string;
-  project: string;
-  topic: string;
-  source: string;
-  timestamp: string;
-  session_id: string;
+  /** The memory store instance */
+  store: MemoryStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,20 +84,19 @@ function defaultConfig(): MemoryConfig {
     wakeUpEnabled: true,
     wakeUpMaxTokens: 800,
     defaultProject: null,
-    pythonPath: "python3",
   };
 }
 
 function createRuntime(): MemoryRuntime {
   return {
     config: defaultConfig(),
-    bufferCount: 0,
     totalMemories: 0,
     projects: {},
     backendAvailable: false,
     wakeUpText: null,
     currentProject: "general",
     enabled: true,
+    store: new MemoryStore(),
   };
 }
 
@@ -139,98 +123,11 @@ function saveConfig(config: MemoryConfig): void {
 }
 
 function detectProject(cwd: string): string {
-  // Try git repo name first
   const gitDir = path.join(cwd, ".git");
   if (fs.existsSync(gitDir)) {
     return path.basename(cwd);
   }
-  // Fall back to directory name
   return path.basename(cwd) || "general";
-}
-
-function appendToBuffer(exchange: BufferedExchange): void {
-  fs.mkdirSync(MEMORY_DIR, { recursive: true });
-  fs.appendFileSync(
-    CAPTURE_BUFFER_PATH,
-    JSON.stringify(exchange) + "\n"
-  );
-}
-
-function readBuffer(): BufferedExchange[] {
-  if (!fs.existsSync(CAPTURE_BUFFER_PATH)) return [];
-  try {
-    const lines = fs.readFileSync(CAPTURE_BUFFER_PATH, "utf-8").trim().split("\n").filter(Boolean);
-    return lines.map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
-}
-
-function clearBuffer(): void {
-  try {
-    if (fs.existsSync(CAPTURE_BUFFER_PATH)) {
-      fs.unlinkSync(CAPTURE_BUFFER_PATH);
-    }
-  } catch {
-    // Ignore
-  }
-}
-
-/**
- * Call the Python memory backend.
- * Returns parsed JSON response or { error: "..." }.
- */
-async function callBackend(
-  pi: ExtensionAPI,
-  pythonPath: string,
-  command: string,
-  args: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  try {
-    const result = await pi.exec(pythonPath, [
-      BACKEND_SCRIPT,
-      command,
-      JSON.stringify(args),
-    ], { timeout: 30000 });
-
-    if (result.code !== 0) {
-      const errMsg = (result.stderr || result.stdout || "").trim();
-      return { error: `Backend error (exit ${result.code}): ${errMsg.slice(0, 300)}` };
-    }
-
-    // Parse the last line of stdout as JSON (skip any progress/warning output)
-    const lines = (result.stdout || "").trim().split("\n");
-    const lastLine = lines[lines.length - 1];
-    return JSON.parse(lastLine);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { error: `Backend call failed: ${msg}` };
-  }
-}
-
-/**
- * Flush the capture buffer to ChromaDB via batch-store.
- */
-async function flushBuffer(
-  pi: ExtensionAPI,
-  runtime: MemoryRuntime
-): Promise<{ stored: number; duplicates: number }> {
-  const items = readBuffer();
-  if (items.length === 0) return { stored: 0, duplicates: 0 };
-
-  const result = await callBackend(pi, runtime.config.pythonPath, "batch-store", { items });
-
-  if (result.error) {
-    return { stored: 0, duplicates: 0 };
-  }
-
-  clearBuffer();
-  runtime.bufferCount = 0;
-
-  return {
-    stored: (result.stored as number) || 0,
-    duplicates: (result.duplicates as number) || 0,
-  };
 }
 
 /**
@@ -273,6 +170,146 @@ function createRuntimeStore() {
 }
 
 // ---------------------------------------------------------------------------
+// Shared tool helpers
+// ---------------------------------------------------------------------------
+
+function textResult(text: string, details: Record<string, unknown> | null = null) {
+  return {
+    content: [{ type: "text" as const, text }],
+    details,
+  };
+}
+
+function renderTextResult(result: any) {
+  const t = result.content[0];
+  return new Text(t?.type === "text" ? t.text : "", 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Stats overlay
+// ---------------------------------------------------------------------------
+
+function barChart(
+  items: [string, number][],
+  maxBarWidth: number,
+  theme: { fg: (color: string, text: string) => string },
+): string[] {
+  if (items.length === 0) return ["  (none)"];
+  const maxVal = Math.max(...items.map(([, v]) => v));
+  const maxLabel = Math.max(...items.map(([k]) => k.length));
+  return items.map(([label, count]) => {
+    const barLen = maxVal > 0 ? Math.round((count / maxVal) * maxBarWidth) : 0;
+    const bar = theme.fg("accent", "█".repeat(barLen)) + "░".repeat(maxBarWidth - barLen);
+    const paddedLabel = label.padEnd(maxLabel);
+    return `  ${theme.fg("text", paddedLabel)} ${bar} ${theme.fg("dim", String(count))}`;
+  });
+}
+
+function sparkline(timeline: Record<string, number>, days: number): string {
+  const sparks = " ▁▂▃▄▅▆▇█";
+  const now = new Date();
+  const values: number[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    values.push(timeline[key] || 0);
+  }
+  const max = Math.max(...values, 1);
+  return values.map((v) => sparks[Math.round((v / max) * (sparks.length - 1))]).join("");
+}
+
+function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function daysBetween(a: string, b: string): number {
+  return Math.round((new Date(b).getTime() - new Date(a).getTime()) / 86400000);
+}
+
+async function showStatsOverlay(
+  ctx: ExtensionContext,
+  stats: MemoryStats,
+): Promise<void> {
+  await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+    const container = new Container();
+
+    container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+    container.addChild(new Text(theme.fg("accent", "  🧠 Memory Stats"), 0, 0));
+    container.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
+
+    if (stats.total === 0) {
+      container.addChild(new Text(theme.fg("dim", "  No memories stored yet."), 0, 0));
+    } else {
+      // Overview
+      const span = stats.oldest && stats.newest
+        ? `${daysBetween(stats.oldest, stats.newest)}d span`
+        : "";
+      const lines = [
+        `  ${theme.fg("text", "Total")}         ${theme.fg("accent", String(stats.total))} memories`,
+        `  ${theme.fg("text", "Storage")}       ${theme.fg("accent", `${stats.storageSizeKb} KB`)}`,
+        `  ${theme.fg("text", "Sessions")}      ${theme.fg("accent", String(stats.sessions))}`,
+        `  ${theme.fg("text", "Avg length")}    ${theme.fg("accent", `${stats.avgContentLength}`)} chars`,
+        `  ${theme.fg("text", "First memory")}  ${theme.fg("dim", formatDate(stats.oldest))}`,
+        `  ${theme.fg("text", "Last memory")}   ${theme.fg("dim", formatDate(stats.newest))}${span ? `  (${theme.fg("dim", span)})` : ""}`,
+      ];
+      container.addChild(new Text(lines.join("\n"), 0, 0));
+
+      // Activity sparkline (last 28 days)
+      container.addChild(new Spacer(1));
+      const spark = sparkline(stats.timeline, 28);
+      container.addChild(new Text(
+        `  ${theme.fg("text", "Activity (28d)")}  ${theme.fg("accent", spark)}`,
+        0, 0,
+      ));
+
+      // Projects bar chart
+      const projectEntries = Object.entries(stats.projects)
+        .sort(([, a], [, b]) => b - a);
+      if (projectEntries.length > 0) {
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(theme.fg("text", "  Projects"), 0, 0));
+        const projectBars = barChart(projectEntries.slice(0, 8), 20, theme);
+        container.addChild(new Text(projectBars.join("\n"), 0, 0));
+      }
+
+      // Topics bar chart
+      const topicEntries = Object.entries(stats.topics)
+        .filter(([t]) => t !== "general")
+        .sort(([, a], [, b]) => b - a);
+      if (topicEntries.length > 0) {
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(theme.fg("text", "  Topics"), 0, 0));
+        const topicBars = barChart(topicEntries.slice(0, 8), 20, theme);
+        container.addChild(new Text(topicBars.join("\n"), 0, 0));
+      }
+
+      // Sources breakdown
+      const sourceEntries = Object.entries(stats.sources)
+        .sort(([, a], [, b]) => b - a);
+      if (sourceEntries.length > 0) {
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(theme.fg("text", "  Sources"), 0, 0));
+        const sourceBars = barChart(sourceEntries, 20, theme);
+        container.addChild(new Text(sourceBars.join("\n"), 0, 0));
+      }
+    }
+
+    container.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
+    container.addChild(new Text(theme.fg("dim", "  press any key to close"), 0, 0));
+    container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+    return {
+      render: (w: number) => container.render(w),
+      invalidate: () => container.invalidate(),
+      handleInput: () => done(undefined),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -281,36 +318,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
   const getSessionKey = (ctx: ExtensionContext) => ctx.sessionManager.getSessionId();
   const getRuntime = (ctx: ExtensionContext): MemoryRuntime =>
     runtimeStore.ensure(getSessionKey(ctx));
-
-  // -----------------------------------------------------------------------
-  // Widget
-  // -----------------------------------------------------------------------
-
-  const updateWidget = (ctx: ExtensionContext) => {
-    if (!ctx.hasUI) return;
-
-    const runtime = getRuntime(ctx);
-    if (!runtime.enabled) {
-      ctx.ui.setWidget("pi-memory", undefined);
-      return;
-    }
-
-    ctx.ui.setWidget("pi-memory", (_tui, theme) => ({
-      render(_width: number): string[] {
-        const parts: string[] = [];
-        const icon = theme.fg("accent", "🧠");
-        const count = theme.fg("text", `${runtime.totalMemories} memories`);
-        const project = theme.fg("dim", `│ ${runtime.currentProject}`);
-        const buf = runtime.bufferCount > 0
-          ? theme.fg("warning", ` │ ${runtime.bufferCount} buffered`)
-          : "";
-
-        parts.push(`${icon} ${count} ${project}${buf}`);
-        return parts;
-      },
-      invalidate(): void {},
-    }));
-  };
 
   // -----------------------------------------------------------------------
   // State reconstruction
@@ -322,32 +329,32 @@ export default function memoryExtension(pi: ExtensionAPI) {
     runtime.currentProject = runtime.config.defaultProject || detectProject(ctx.cwd);
     runtime.enabled = true;
 
-    // Count buffered items
-    const buffer = readBuffer();
-    runtime.bufferCount = buffer.length;
-
-    // Check backend availability and get status
-    const status = await callBackend(pi, runtime.config.pythonPath, "status", {});
-    if (status.error) {
+    // Load the memory store from disk
+    try {
+      runtime.store.load();
+      runtime.backendAvailable = true;
+      const status = runtime.store.status();
+      runtime.totalMemories = status.total_memories;
+      runtime.projects = status.projects;
+    } catch {
       runtime.backendAvailable = false;
       runtime.totalMemories = 0;
       runtime.projects = {};
-    } else {
-      runtime.backendAvailable = true;
-      runtime.totalMemories = (status.total_memories as number) || 0;
-      runtime.projects = (status.projects as Record<string, number>) || {};
     }
 
-    // Pre-generate wake-up text
+    // Pre-generate wake-up text (no embedding needed — just reads from memory)
     if (runtime.config.wakeUpEnabled && runtime.backendAvailable) {
-      const wakeup = await callBackend(pi, runtime.config.pythonPath, "wakeup", {
-        project: runtime.currentProject,
-        max_tokens: runtime.config.wakeUpMaxTokens,
-      });
-      runtime.wakeUpText = (wakeup.text as string) || null;
+      try {
+        const wakeup = runtime.store.wakeup({
+          project: runtime.currentProject,
+          max_tokens: runtime.config.wakeUpMaxTokens,
+        });
+        runtime.wakeUpText = wakeup.text || null;
+      } catch {
+        runtime.wakeUpText = null;
+      }
     }
 
-    updateWidget(ctx);
   };
 
   // -----------------------------------------------------------------------
@@ -363,33 +370,20 @@ export default function memoryExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_e, ctx) => {
-    // Flush buffer before shutdown
-    const runtime = getRuntime(ctx);
-    if (runtime.enabled && runtime.backendAvailable && runtime.bufferCount > 0) {
-      await flushBuffer(pi, runtime);
-    }
     runtimeStore.clear(getSessionKey(ctx));
   });
 
-  pi.on("session_before_compact", async (_e, ctx) => {
-    // Flush buffer before compaction to avoid losing memories
-    const runtime = getRuntime(ctx);
-    if (runtime.enabled && runtime.backendAvailable && runtime.bufferCount > 0) {
-      await flushBuffer(pi, runtime);
-    }
-  });
-
-  // Auto-capture: after each agent turn, extract and buffer the exchange
+  // Auto-capture: after each agent turn, extract and store the exchange
   pi.on("turn_end", async (event, ctx) => {
     const runtime = getRuntime(ctx);
     if (!runtime.enabled || !runtime.config.autoCapture) return;
+    if (!runtime.backendAvailable) return;
 
-    // We capture assistant messages and look back for the user message
     if (event.message?.role !== "assistant") return;
 
     const msg = event.message as unknown as Record<string, unknown>;
     const assistantText = extractTextFromContent(msg.content);
-    if (!assistantText || assistantText.length < 20) return; // Skip trivial responses
+    if (!assistantText || assistantText.length < 20) return;
 
     // Find the preceding user message from session history
     const branch = ctx.sessionManager.getBranch();
@@ -407,27 +401,32 @@ export default function memoryExtension(pi: ExtensionAPI) {
       }
     }
 
-    if (!userText || userText.length < 10) return; // Skip trivial inputs
+    if (!userText || userText.length < 10) return;
 
-    // Build exchange content (user + assistant pair)
+    // Build exchange content
     const exchange = `> ${userText}\n\n${assistantText}`;
+    const content = exchange.length > 2000
+      ? exchange.slice(0, 2000) + "\n[truncated]"
+      : exchange;
 
-    // Truncate very long exchanges (keep first 2000 chars)
-    const content = exchange.length > 2000 ? exchange.slice(0, 2000) + "\n[truncated]" : exchange;
+    try {
+      const result = await runtime.store.store({
+        content,
+        project: runtime.currentProject,
+        topic: "general",
+        source: "auto-capture",
+        timestamp: new Date().toISOString(),
+        session_id: getSessionKey(ctx),
+      });
 
-    // Buffer the exchange
-    const buffered: BufferedExchange = {
-      content,
-      project: runtime.currentProject,
-      topic: "general", // Could be auto-detected in the future
-      source: "auto-capture",
-      timestamp: new Date().toISOString(),
-      session_id: getSessionKey(ctx),
-    };
-
-    appendToBuffer(buffered);
-    runtime.bufferCount++;
-    updateWidget(ctx);
+      if (result.status === "stored") {
+        runtime.totalMemories++;
+        runtime.projects[runtime.currentProject] =
+          (runtime.projects[runtime.currentProject] || 0) + 1;
+      }
+    } catch {
+      // Silently fail — don't interrupt the session
+    }
   });
 
   // Inject wake-up context into system prompt
@@ -479,45 +478,33 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const runtime = getRuntime(ctx);
-      const result = await callBackend(pi, runtime.config.pythonPath, "search", {
-        query: params.query,
-        project: params.project || null,
-        topic: params.topic || null,
-        n_results: params.n_results || 5,
-      });
 
-      if (result.error) {
-        return {
-          content: [{ type: "text" as const, text: `Memory search failed: ${result.error}` }],
-          details: null,
-        };
+      try {
+        const result = await runtime.store.search(params.query, {
+          project: params.project,
+          topic: params.topic,
+          n_results: params.n_results,
+        });
+
+        if (result.results.length === 0) {
+          return textResult(`No memories found for: "${params.query}"`);
+        }
+
+        let text = `Found ${result.results.length} memories for "${params.query}":\n\n`;
+        for (const hit of result.results) {
+          const sim = (hit.similarity * 100).toFixed(1);
+          text += `[${hit.project}/${hit.topic}] (${sim}% match, ${hit.timestamp})\n`;
+          text += `${hit.text}\n\n---\n\n`;
+        }
+
+        return textResult(text, { query: params.query, hitCount: result.results.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Memory search failed: ${msg}`);
       }
-
-      const hits = (result.results as Array<Record<string, unknown>>) || [];
-      if (hits.length === 0) {
-        return {
-          content: [{ type: "text" as const, text: `No memories found for: "${params.query}"` }],
-          details: null,
-        };
-      }
-
-      let text = `Found ${hits.length} memories for "${params.query}":\n\n`;
-      for (const hit of hits) {
-        const sim = ((hit.similarity as number) * 100).toFixed(1);
-        text += `[${hit.project}/${hit.topic}] (${sim}% match, ${hit.timestamp})\n`;
-        text += `${hit.text}\n\n---\n\n`;
-      }
-
-      return {
-        content: [{ type: "text" as const, text }],
-        details: { query: params.query, hitCount: hits.length },
-      };
     },
 
-    renderResult(result, _options, theme) {
-      const t = result.content[0];
-      return new Text(t?.type === "text" ? (t as { text: string }).text : "", 0, 0);
-    },
+    renderResult: renderTextResult,
   });
 
   // --- memory_save ---
@@ -548,47 +535,35 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const runtime = getRuntime(ctx);
       const project = params.project || runtime.currentProject;
 
-      const result = await callBackend(pi, runtime.config.pythonPath, "store", {
-        content: params.content,
-        project,
-        topic: params.topic || "general",
-        source: "manual-save",
-        timestamp: new Date().toISOString(),
-        session_id: getSessionKey(ctx),
-      });
+      try {
+        const result = await runtime.store.store({
+          content: params.content,
+          project,
+          topic: params.topic || "general",
+          source: "manual-save",
+          timestamp: new Date().toISOString(),
+          session_id: getSessionKey(ctx),
+        });
 
-      if (result.error) {
-        return {
-          content: [{ type: "text" as const, text: `Failed to save memory: ${result.error}` }],
-          details: null,
-        };
+        if (result.status === "duplicate") {
+          return textResult(`This memory already exists (${result.id}).`, { status: "duplicate", id: result.id });
+        }
+
+        // Update cached counts
+        runtime.totalMemories++;
+        runtime.projects[project] = (runtime.projects[project] || 0) + 1;
+
+        return textResult(
+          `✅ Saved to memory (${result.id}) in ${project}/${params.topic || "general"}`,
+          { status: "stored", id: result.id, project },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Failed to save memory: ${msg}`);
       }
-
-      if (result.status === "duplicate") {
-        return {
-          content: [{ type: "text" as const, text: `This memory already exists (${result.id}).` }],
-          details: { status: "duplicate", id: result.id },
-        };
-      }
-
-      // Update cached counts
-      runtime.totalMemories++;
-      runtime.projects[project] = (runtime.projects[project] || 0) + 1;
-      updateWidget(ctx);
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: `✅ Saved to memory (${result.id}) in ${project}/${params.topic || "general"}`,
-        }],
-        details: { status: "stored", id: result.id, project },
-      };
     },
 
-    renderResult(result, _options, theme) {
-      const t = result.content[0];
-      return new Text(t?.type === "text" ? (t as { text: string }).text : "", 0, 0);
-    },
+    renderResult: renderTextResult,
   });
 
   // --- memory_recall ---
@@ -618,48 +593,36 @@ export default function memoryExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const runtime = getRuntime(ctx);
 
-      const result = await callBackend(pi, runtime.config.pythonPath, "recall", {
-        project: params.project || null,
-        topic: params.topic || null,
-        n_results: params.n_results || 10,
-      });
+      try {
+        const result = runtime.store.recall({
+          project: params.project,
+          topic: params.topic,
+          n_results: params.n_results,
+        });
 
-      if (result.error) {
-        return {
-          content: [{ type: "text" as const, text: `Memory recall failed: ${result.error}` }],
-          details: null,
-        };
+        if (result.results.length === 0) {
+          const label = [params.project, params.topic].filter(Boolean).join("/") || "all";
+          return textResult(`No memories found for: ${label}`);
+        }
+
+        let text = `${result.results.length} memories`;
+        if (params.project) text += ` for project "${params.project}"`;
+        if (params.topic) text += ` in topic "${params.topic}"`;
+        text += ":\n\n";
+
+        for (const item of result.results) {
+          text += `[${item.project}/${item.topic}] (${item.timestamp})\n`;
+          text += `${item.text}\n\n---\n\n`;
+        }
+
+        return textResult(text, { count: result.results.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Memory recall failed: ${msg}`);
       }
-
-      const items = (result.results as Array<Record<string, unknown>>) || [];
-      if (items.length === 0) {
-        const label = [params.project, params.topic].filter(Boolean).join("/") || "all";
-        return {
-          content: [{ type: "text" as const, text: `No memories found for: ${label}` }],
-          details: null,
-        };
-      }
-
-      let text = `${items.length} memories`;
-      if (params.project) text += ` for project "${params.project}"`;
-      if (params.topic) text += ` in topic "${params.topic}"`;
-      text += ":\n\n";
-
-      for (const item of items) {
-        text += `[${item.project}/${item.topic}] (${item.timestamp})\n`;
-        text += `${item.text}\n\n---\n\n`;
-      }
-
-      return {
-        content: [{ type: "text" as const, text }],
-        details: { count: items.length },
-      };
     },
 
-    renderResult(result, _options, theme) {
-      const t = result.content[0];
-      return new Text(t?.type === "text" ? (t as { text: string }).text : "", 0, 0);
-    },
+    renderResult: renderTextResult,
   });
 
   // --- memory_status ---
@@ -673,50 +636,38 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const runtime = getRuntime(ctx);
-      const result = await callBackend(pi, runtime.config.pythonPath, "status", {});
 
-      if (result.error) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Memory status unavailable: ${result.error}\n\nRun /skill:memory-setup to configure.`,
-          }],
-          details: null,
-        };
-      }
+      try {
+        const result = runtime.store.status();
 
-      // Update cached state
-      runtime.totalMemories = (result.total_memories as number) || 0;
-      runtime.projects = (result.projects as Record<string, number>) || {};
-      updateWidget(ctx);
+        // Update cached state
+        runtime.totalMemories = result.total_memories;
+        runtime.projects = result.projects;
 
-      let text = "## Memory Status\n\n";
-      text += `- **Total memories**: ${result.total_memories}\n`;
-      text += `- **Identity**: ${result.identity_exists ? "✅ configured" : "❌ not configured"}\n`;
-      text += `- **Storage**: ${result.storage_size_kb} KB\n`;
-      text += `- **Current project**: ${runtime.currentProject}\n`;
-      text += `- **Auto-capture**: ${runtime.config.autoCapture ? "on" : "off"}\n`;
-      text += `- **Wake-up**: ${runtime.config.wakeUpEnabled ? "on" : "off"}\n`;
-      text += `- **Buffer**: ${runtime.bufferCount} exchanges pending\n\n`;
+        let text = "## Memory Status\n\n";
+        text += `- **Total memories**: ${result.total_memories}\n`;
+        text += `- **Identity**: ${result.identity_exists ? "✅ configured" : "❌ not configured"}\n`;
+        text += `- **Storage**: ${result.storage_size_kb} KB\n`;
+        text += `- **Current project**: ${runtime.currentProject}\n`;
+        text += `- **Auto-capture**: ${runtime.config.autoCapture ? "on" : "off"}\n`;
+        text += `- **Wake-up**: ${runtime.config.wakeUpEnabled ? "on" : "off"}\n`;
+        text += `- **Backend**: pure TypeScript (in-process)\n\n`;
 
-      const projects = result.projects as Record<string, number> | undefined;
-      if (projects && Object.keys(projects).length > 0) {
-        text += "### Projects\n";
-        for (const [proj, count] of Object.entries(projects)) {
-          text += `- ${proj}: ${count} memories\n`;
+        if (result.projects && Object.keys(result.projects).length > 0) {
+          text += "### Projects\n";
+          for (const [proj, count] of Object.entries(result.projects)) {
+            text += `- ${proj}: ${count} memories\n`;
+          }
         }
+
+        return textResult(text, { totalMemories: result.total_memories, projects: result.projects });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Memory status unavailable: ${msg}\n\nRun /skill:memory-setup to configure.`);
       }
-
-      return {
-        content: [{ type: "text" as const, text }],
-        details: { totalMemories: result.total_memories, projects: result.projects },
-      };
     },
 
-    renderResult(result, _options, theme) {
-      const t = result.content[0];
-      return new Text(t?.type === "text" ? (t as { text: string }).text : "", 0, 0);
-    },
+    renderResult: renderTextResult,
   });
 
   // -----------------------------------------------------------------------
@@ -732,35 +683,16 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       switch (subcmd) {
         case "status": {
-          const result = await callBackend(pi, runtime.config.pythonPath, "status", {});
-          if (result.error) {
-            ctx.ui.notify(`Memory error: ${result.error}`, "error");
-          } else {
+          try {
+            const result = runtime.store.status();
             ctx.ui.notify(
-              `🧠 ${result.total_memories} memories | ${Object.keys(result.projects as Record<string, number> || {}).length} projects | ${result.storage_size_kb} KB`,
+              `🧠 ${result.total_memories} memories | ${Object.keys(result.projects).length} projects | ${result.storage_size_kb} KB`,
               "info"
             );
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            ctx.ui.notify(`Memory error: ${msg}`, "error");
           }
-          break;
-        }
-
-        case "flush": {
-          if (!runtime.backendAvailable) {
-            ctx.ui.notify("Memory backend not available", "error");
-            break;
-          }
-          const flushed = await flushBuffer(pi, runtime);
-          ctx.ui.notify(
-            `Flushed: ${flushed.stored} stored, ${flushed.duplicates} duplicates`,
-            "info"
-          );
-          // Refresh status
-          const status = await callBackend(pi, runtime.config.pythonPath, "status", {});
-          if (!status.error) {
-            runtime.totalMemories = (status.total_memories as number) || 0;
-            runtime.projects = (status.projects as Record<string, number>) || {};
-          }
-          updateWidget(ctx);
           break;
         }
 
@@ -770,7 +702,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
           runtime.config.defaultProject = projectName;
           saveConfig(runtime.config);
           ctx.ui.notify(`Project set to: ${projectName}`, "info");
-          updateWidget(ctx);
           break;
         }
 
@@ -780,7 +711,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
           runtime.config.wakeUpEnabled = true;
           saveConfig(runtime.config);
           ctx.ui.notify("Memory enabled", "info");
-          updateWidget(ctx);
           break;
         }
 
@@ -790,7 +720,21 @@ export default function memoryExtension(pi: ExtensionAPI) {
           runtime.config.wakeUpEnabled = false;
           saveConfig(runtime.config);
           ctx.ui.notify("Memory disabled", "info");
-          updateWidget(ctx);
+          break;
+        }
+
+        case "stats": {
+          if (!runtime.backendAvailable) {
+            ctx.ui.notify("Memory backend not available", "error");
+            break;
+          }
+          try {
+            const stats = runtime.store.computeStats();
+            await showStatsOverlay(ctx, stats);
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            ctx.ui.notify(`Stats error: ${msg}`, "error");
+          }
           break;
         }
 
@@ -800,21 +744,20 @@ export default function memoryExtension(pi: ExtensionAPI) {
             ctx.ui.notify("Usage: /memory search <query>", "warning");
             break;
           }
-          // Delegate to the agent by sending a user message
           pi.sendUserMessage(`Search my memory for: ${query}`);
           break;
         }
 
         default: {
           ctx.ui.notify(
-            "Usage: /memory [status|flush|project <name>|search <query>|on|off]",
+            "Usage: /memory [status|stats|project <name>|search <query>|on|off]",
             "info"
           );
         }
       }
     },
     getArgumentCompletions: (prefix) => {
-      const commands = ["status", "flush", "project", "search", "on", "off"];
+      const commands = ["status", "stats", "project", "search", "on", "off"];
       return commands
         .filter((c) => c.startsWith(prefix))
         .map((c) => ({ label: c, value: c, type: "text" as const }));
