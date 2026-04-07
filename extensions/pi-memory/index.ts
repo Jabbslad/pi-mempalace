@@ -387,7 +387,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     // We capture assistant messages and look back for the user message
     if (event.message?.role !== "assistant") return;
 
-    const msg = event.message as Record<string, unknown>;
+    const msg = event.message as unknown as Record<string, unknown>;
     const assistantText = extractTextFromContent(msg.content);
     if (!assistantText || assistantText.length < 20) return; // Skip trivial responses
 
@@ -397,7 +397,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
       if (entry.type === "message" && entry.message.role === "user") {
-        const userMsg = entry.message as Record<string, unknown>;
+        const userMsg = entry.message as unknown as Record<string, unknown>;
         if (typeof userMsg.content === "string") {
           userText = userMsg.content;
         } else if (Array.isArray(userMsg.content)) {
@@ -489,6 +489,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (result.error) {
         return {
           content: [{ type: "text" as const, text: `Memory search failed: ${result.error}` }],
+          details: null,
         };
       }
 
@@ -496,6 +497,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (hits.length === 0) {
         return {
           content: [{ type: "text" as const, text: `No memories found for: "${params.query}"` }],
+          details: null,
         };
       }
 
@@ -508,6 +510,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       return {
         content: [{ type: "text" as const, text }],
+        details: { query: params.query, hitCount: hits.length },
       };
     },
 
@@ -557,12 +560,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (result.error) {
         return {
           content: [{ type: "text" as const, text: `Failed to save memory: ${result.error}` }],
+          details: null,
         };
       }
 
       if (result.status === "duplicate") {
         return {
           content: [{ type: "text" as const, text: `This memory already exists (${result.id}).` }],
+          details: { status: "duplicate", id: result.id },
         };
       }
 
@@ -576,6 +581,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           type: "text" as const,
           text: `✅ Saved to memory (${result.id}) in ${project}/${params.topic || "general"}`,
         }],
+        details: { status: "stored", id: result.id, project },
       };
     },
 
@@ -621,6 +627,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       if (result.error) {
         return {
           content: [{ type: "text" as const, text: `Memory recall failed: ${result.error}` }],
+          details: null,
         };
       }
 
@@ -629,6 +636,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         const label = [params.project, params.topic].filter(Boolean).join("/") || "all";
         return {
           content: [{ type: "text" as const, text: `No memories found for: ${label}` }],
+          details: null,
         };
       }
 
@@ -644,6 +652,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       return {
         content: [{ type: "text" as const, text }],
+        details: { count: items.length },
       };
     },
 
@@ -672,6 +681,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
             type: "text" as const,
             text: `Memory status unavailable: ${result.error}\n\nRun /skill:memory-setup to configure.`,
           }],
+          details: null,
         };
       }
 
@@ -699,6 +709,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       return {
         content: [{ type: "text" as const, text }],
+        details: { totalMemories: result.total_memories, projects: result.projects },
       };
     },
 
@@ -806,7 +817,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const commands = ["status", "flush", "project", "search", "on", "off"];
       return commands
         .filter((c) => c.startsWith(prefix))
-        .map((c) => ({ label: c, type: "text" as const }));
+        .map((c) => ({ label: c, value: c, type: "text" as const }));
     },
   });
 }
