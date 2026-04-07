@@ -177,14 +177,17 @@ pi (TypeScript — everything in-process)
 
 ### ⚡ Performance
 
+Benchmarked on Apple Silicon (M-series). Your mileage may vary, but it'll be fast.
+
 | Operation | Time | Vibes |
 |-----------|------|-------|
-| Model load (once per session) | ~660ms | ☕ Sip of coffee |
-| Embed text | ~4ms | ⚡ Blink and you'll miss it |
-| Search 1,000 memories | ~5ms | 🚀 Faster than you can forget |
-| Search 100,000 memories | ~15ms | 🚀 Still faster than you can forget |
-| Store 1 memory | ~4ms | 💾 Practically instant |
-| Startup (L0+L1 only) | ~250ms | 🌅 Dawn of a new session |
+| Model load (first store) | ~200ms | ☕ One-time cost per session |
+| Store 1 memory (warm) | ~1ms | ⚡ Blink and you'll miss it |
+| Search 100 memories | ~1ms | 🚀 Faster than you can forget |
+| Wakeup L0+L1 | <1ms | 🌅 Instant dawn |
+| Recall L2 (filtered) | <1ms | 🎯 SQL indexes go brrr |
+| Knowledge graph query | <1ms | 🧩 Basically free |
+| Palace graph | <1ms | 🏰 All the tunnels, no waiting |
 
 ### 💾 Storage
 
