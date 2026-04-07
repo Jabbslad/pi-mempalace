@@ -5,3 +5,5 @@ dist/
 *.map
 .DS_Store
 .pytest_cache/
+benchmarks/data/
+benchmarks/results/
