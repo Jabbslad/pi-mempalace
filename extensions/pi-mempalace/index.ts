@@ -21,7 +21,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
-import type { MemoryStats, PalaceGraph, TunnelInfo, KnowledgeResult, KnowledgeStats, Fact } from "./memory_store.js";
+import type { MemoryStats } from "./memory_store.js";
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -354,7 +354,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
         runtime.wakeUpText = null;
       }
     }
-
   };
 
   // -----------------------------------------------------------------------

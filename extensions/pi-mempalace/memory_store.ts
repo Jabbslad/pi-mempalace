@@ -39,7 +39,6 @@ const MEMORY_DIR = path.join(
   "agent",
   "memory"
 );
-const IDENTITY_PATH = path.join(MEMORY_DIR, "identity.txt");
 const MODEL_NAME = "Xenova/all-MiniLM-L6-v2";
 const EMBEDDING_DIM = 384;
 
@@ -269,12 +268,6 @@ async function embed(text: string): Promise<Float32Array> {
   return new Float32Array(result.data);
 }
 
-function embeddingToBase64(vec: Float32Array): string {
-  return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength).toString(
-    "base64"
-  );
-}
-
 function base64ToEmbedding(b64: string): Float32Array {
   const buf = Buffer.from(b64, "base64");
   return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
@@ -430,20 +423,6 @@ export class MemoryStore {
     } catch {
       /* column already exists */
     }
-
-    // Tunnels table for Palace Graph
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS tunnels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic TEXT NOT NULL,
-        project_a TEXT NOT NULL,
-        project_b TEXT NOT NULL,
-        memory_count INTEGER DEFAULT 0,
-        last_updated TEXT NOT NULL,
-        UNIQUE(topic, project_a, project_b)
-      );
-      CREATE INDEX IF NOT EXISTS idx_tunnels_topic ON tunnels(topic);
-    `);
 
     // Knowledge Graph tables
     this.db.exec(`
@@ -897,31 +876,20 @@ export class MemoryStore {
    * grouped by project with compact formatting.
    */
   private generateL1(project: string | null, maxChars: number): string {
-    const total = this.countAll();
-    if (total === 0) {
+    if (this.countAll() === 0) {
       return "\n## Memory — Recent Context\nNo memories stored yet.";
     }
 
-    let rows: MemoryRow[];
-    if (project) {
-      rows = this.db
-        .prepare(
-          `SELECT content, project, topic, timestamp, importance
-           FROM memories WHERE project = ?
-           ORDER BY importance DESC, timestamp DESC
-           LIMIT 15`
-        )
-        .all(project) as MemoryRow[];
-    } else {
-      rows = this.db
-        .prepare(
-          `SELECT content, project, topic, timestamp, importance
-           FROM memories
-           ORDER BY importance DESC, timestamp DESC
-           LIMIT 15`
-        )
-        .all() as MemoryRow[];
-    }
+    const whereClause = project ? "WHERE project = ?" : "";
+    const params = project ? [project] : [];
+    const rows = this.db
+      .prepare(
+        `SELECT content, project, topic, timestamp, importance
+         FROM memories ${whereClause}
+         ORDER BY importance DESC, timestamp DESC
+         LIMIT 15`
+      )
+      .all(...params) as MemoryRow[];
 
     if (rows.length === 0) {
       return "\n## Memory — Recent Context\nNo memories stored yet.";
@@ -967,23 +935,13 @@ export class MemoryStore {
     const projects = this.countByProject();
     const total = this.countAll();
 
-    let storageSizeKb = 0;
-    try {
-      if (fs.existsSync(this.dbPath)) {
-        storageSizeKb =
-          Math.round((fs.statSync(this.dbPath).size / 1024) * 10) / 10;
-      }
-    } catch {
-      // Ignore
-    }
-
     return {
       memory_dir: this.memoryDir,
       store_path: this.dbPath,
       identity_exists: fs.existsSync(this.identityPath),
       total_memories: total,
       projects,
-      storage_size_kb: storageSizeKb,
+      storage_size_kb: this.getStorageSizeKb(),
     };
   }
 
@@ -1098,34 +1056,9 @@ export class MemoryStore {
       };
     }
 
-    // Project counts
-    const projects: Record<string, number> = {};
-    const projectRows = this.db
-      .prepare(
-        `SELECT project, COUNT(*) as cnt FROM memories GROUP BY project`
-      )
-      .all() as CountRow[];
-    for (const r of projectRows) {
-      projects[r.project || "general"] = r.cnt;
-    }
-
-    // Topic counts
-    const topics: Record<string, number> = {};
-    const topicRows = this.db
-      .prepare(`SELECT topic, COUNT(*) as cnt FROM memories GROUP BY topic`)
-      .all() as CountRow[];
-    for (const r of topicRows) {
-      topics[r.topic || "general"] = r.cnt;
-    }
-
-    // Source counts
-    const sources: Record<string, number> = {};
-    const sourceRows = this.db
-      .prepare(`SELECT source, COUNT(*) as cnt FROM memories GROUP BY source`)
-      .all() as CountRow[];
-    for (const r of sourceRows) {
-      sources[r.source || "unknown"] = r.cnt;
-    }
+    const projects = this.groupedCounts("project");
+    const topics = this.groupedCounts("topic");
+    const sources = this.groupedCounts("source");
 
     // Session count
     const sessionCount = (
@@ -1167,17 +1100,6 @@ export class MemoryStore {
         .get() as { val: number }
     ).val;
 
-    // Storage size
-    let storageSizeKb = 0;
-    try {
-      if (fs.existsSync(this.dbPath)) {
-        storageSizeKb =
-          Math.round((fs.statSync(this.dbPath).size / 1024) * 10) / 10;
-      }
-    } catch {
-      /* ignore */
-    }
-
     return {
       total,
       projects,
@@ -1188,7 +1110,7 @@ export class MemoryStore {
       newest,
       timeline,
       avgContentLength: Math.round(avgLen || 0),
-      storageSizeKb,
+      storageSizeKb: this.getStorageSizeKb(),
     };
   }
 
@@ -1571,17 +1493,28 @@ export class MemoryStore {
   // Utility
   // -----------------------------------------------------------------------
 
+  private getStorageSizeKb(): number {
+    try {
+      if (fs.existsSync(this.dbPath)) {
+        return Math.round((fs.statSync(this.dbPath).size / 1024) * 10) / 10;
+      }
+    } catch { /* ignore */ }
+    return 0;
+  }
+
   private countByProject(): Record<string, number> {
-    const projects: Record<string, number> = {};
+    return this.groupedCounts("project");
+  }
+
+  private groupedCounts(column: string): Record<string, number> {
+    const result: Record<string, number> = {};
     const rows = this.db
-      .prepare(
-        `SELECT project, COUNT(*) as cnt FROM memories GROUP BY project`
-      )
-      .all() as CountRow[];
+      .prepare(`SELECT ${column}, COUNT(*) as cnt FROM memories GROUP BY ${column}`)
+      .all() as Record<string, any>[];
     for (const r of rows) {
-      projects[r.project || "general"] = r.cnt;
+      result[r[column] || "general"] = r.cnt;
     }
-    return projects;
+    return result;
   }
 
   /** Get total memory count. */
