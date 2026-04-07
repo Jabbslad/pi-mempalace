@@ -38,11 +38,32 @@ pi-mempalace takes that core philosophy — **verbatim storage + semantic search
 ## 🚀 Install
 
 ```bash
-# Install the pi extension — everything is npm packages, no Python required
+# Install from GitHub
+pi install https://github.com/Jabbslad/pi-mempalace
+
+# Or from a local checkout
 pi install /path/to/pi-mempalace
 ```
 
-That's it. No conda environments. No Docker containers. No sacrificial offerings to the dependency gods.
+That's it. `pi install` runs `npm install` automatically, which pulls in all three runtime dependencies:
+
+| Dependency | What It Does | Native? |
+|-----------|-------------|--------|
+| `@huggingface/transformers` | Local embeddings (all-MiniLM-L6-v2, 384 dims) | No — pure JS, downloads model on first use (~80MB) |
+| `better-sqlite3` | SQLite database access | Yes — compiles native addon via `node-gyp` |
+| `sqlite-vec` | Vector similarity search for SQLite | Yes — ships prebuilt binary per platform |
+
+No Python. No conda. No Docker. No ChromaDB server. No API keys. No sacrificial offerings to the dependency gods.
+
+### Prerequisites
+
+- **Node.js** (required by pi)
+- **C++ toolchain** for `better-sqlite3`'s native build:
+  - macOS: `xcode-select --install`
+  - Linux: `sudo apt install build-essential` (or equivalent)
+  - Windows: Visual Studio Build Tools
+
+Most dev machines already have this. If `pi install` fails with gyp errors, that's the fix.
 
 ---
 
