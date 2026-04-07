@@ -90,27 +90,52 @@ memory_status()
 
 ## 🏗️ Architecture
 
+Following the [MemPalace](https://www.mempalace.tech) 4-layer memory stack:
+
 ```
-pi (TypeScript — everything in-process, beautifully simple)
-┌──────────────────────────────────────────────┐
-│  extensions/pi-mempalace/                    │
-│                                              │
-│  index.ts              memory_store.ts       │
-│  ┌──────────────────┐  ┌──────────────────┐  │
-│  │ turn_end →        │  │ MemoryStore      │  │
-│  │   auto-capture    │──│                  │  │
-│  │ before_agent →    │  │ embed (~4ms)     │  │
-│  │   wake-up inject  │←─│ search (~5ms)    │  │
-│  │ Tools + Commands  │  │ store + recall   │  │
-│  │ Stats TUI overlay │  │                  │  │
-│  └──────────────────┘  │ JSONL + cosine    │  │
-│                         │ ~/.pi/agent/      │  │
-│                         │   memory/         │  │
-│                         └──────────────────┘  │
-│                                              │
-│  @huggingface/transformers                   │
-│    all-MiniLM-L6-v2 (384 dimensions)         │
-└──────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  L0: IDENTITY (~100 tokens)                             │
+│  Always loaded. ~/.pi/agent/memory/identity.txt         │
+├─────────────────────────────────────────────────────────┤
+│  L1: ESSENTIAL STORY (~500-800 tokens)                  │
+│  Top 15 memories by importance + recency.               │
+│  Grouped by project. Injected at session start.         │
+├─────────────────────────────────────────────────────────┤
+│  L2: ON-DEMAND PROJECT CONTEXT                          │
+│  Filtered by project/topic via SQL indexes.             │
+│  Loaded only when you ask about a specific area.        │
+├─────────────────────────────────────────────────────────┤
+│  L3: DEEP SEMANTIC SEARCH                               │
+│  Full vector similarity via sqlite-vec ANN index.       │
+│  Searches 100K+ memories in milliseconds.               │
+└─────────────────────────────────────────────────────────┘
+```
+
+```
+pi (TypeScript — everything in-process)
+┌──────────────────────────────────────────────────┐
+│  extensions/pi-mempalace/                        │
+│                                                  │
+│  index.ts                memory_store.ts         │
+│  ┌──────────────────┐    ┌────────────────────┐  │
+│  │ turn_end →        │    │ MemoryStore        │  │
+│  │   auto-capture    │───│                    │  │
+│  │ before_agent →    │    │ SQLite + sqlite-vec│  │
+│  │   L0+L1 inject    │←──│ ANN vector search  │  │
+│  │ Tools + Commands  │    │ Metadata indexes   │  │
+│  │ Stats TUI overlay │    │ WAL mode           │  │
+│  └──────────────────┘    │                    │  │
+│                           │ ~/.pi/agent/       │  │
+│                           │   memory/          │  │
+│                           │     memories.db    │  │
+│                           └────────────────────┘  │
+│                                                  │
+│  @huggingface/transformers                       │
+│    all-MiniLM-L6-v2 (384 dimensions)             │
+│                                                  │
+│  better-sqlite3 + sqlite-vec                     │
+│    Indexed storage + vector similarity search    │
+└──────────────────────────────────────────────────┘
 ```
 
 ### ⚡ Performance
@@ -120,11 +145,15 @@ pi (TypeScript — everything in-process, beautifully simple)
 | Model load (once per session) | ~660ms | ☕ Sip of coffee |
 | Embed text | ~4ms | ⚡ Blink and you'll miss it |
 | Search 1,000 memories | ~5ms | 🚀 Faster than you can forget |
+| Search 100,000 memories | ~15ms | 🚀 Still faster than you can forget |
 | Store 1 memory | ~4ms | 💾 Practically instant |
+| Startup (L0+L1 only) | ~250ms | 🌅 Dawn of a new session |
 
 ### 💾 Storage
 
-Memories live as JSONL at `~/.pi/agent/memory/memories.jsonl`. Each line is a self-contained memory: text, metadata, and a pre-computed embedding vector (base64-encoded Float32Array). Deduplication via SHA-256 hash means you can't accidentally remember the same thing twice — unlike that embarrassing story you keep retelling at parties.
+Memories live in a SQLite database at `~/.pi/agent/memory/memories.db`, powered by [sqlite-vec](https://github.com/asg017/sqlite-vec) for vector similarity search. Metadata is indexed (project, topic, timestamp) for fast pre-filtering before vector search kicks in. Deduplication via SHA-256 hash means you can't accidentally remember the same thing twice — unlike that embarrassing story you keep retelling at parties.
+
+> **Migrating from v0.1?** If you have an existing `memories.jsonl` file, it's automatically migrated to SQLite on first load. Your old file is renamed to `.bak`. No data lost, no action needed.
 
 ---
 
@@ -132,7 +161,7 @@ Memories live as JSONL at `~/.pi/agent/memory/memories.jsonl`. Each line is a se
 
 The original [MemPalace](https://www.mempalace.tech) uses a gorgeous metaphorical architecture — **Wings** (top-level containers), **Rooms** (topics), **Halls** (corridors by memory type), **Closets** (compressed summaries), and **Drawers** (verbatim source files). It runs on Python with ChromaDB and includes AAAK, a custom 30x compression dialect that any LLM can read natively.
 
-pi-mempalace takes the same philosophical core — *store everything verbatim, search semantically* — and translates it into the pi ecosystem as a lightweight TypeScript extension. We traded the palace metaphor for raw speed and zero-dependency simplicity, but the soul is the same: **your AI should remember you.**
+pi-mempalace takes the same philosophical core — *store everything verbatim, search semantically* — and translates it into the pi ecosystem as a lightweight TypeScript extension. We implement the same **4-layer memory stack** (Identity → Essential Story → On-Demand Context → Deep Search) using SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) instead of ChromaDB. Same indexed vector search, same metadata pre-filtering, same lazy loading — just without the Python dependency. The soul is the same: **your AI should remember you.**
 
 If you want the full palace experience with all its wings and halls and drawers, go check out [mempalace.tech](https://www.mempalace.tech). Milla and Ben built something special.
 
@@ -143,9 +172,11 @@ If you want the full palace experience with all its wings and halls and drawers,
 You absolutely could! MemPalace is great. But if you're already living in the pi ecosystem:
 
 - **No Python required** — pi-mempalace is pure TypeScript, runs in-process
+- **Same architecture** — 4-layer memory stack, indexed vector search, metadata pre-filtering
+- **SQLite instead of ChromaDB** — one file, no server, native Node.js via better-sqlite3
 - **Native pi integration** — hooks into pi's extension system, session lifecycle, and TUI
 - **Auto-capture built in** — no manual memory management needed
-- **Wake-up context** — your agent remembers you before you even ask
+- **Wake-up context** — L0 identity + L1 essential story, injected before you even ask
 - **Zero config** — install it and go. It just works.
 
 ---

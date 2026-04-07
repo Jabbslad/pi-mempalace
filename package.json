@@ -16,7 +16,9 @@
     ]
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.0.1"
+    "@huggingface/transformers": "^4.0.1",
+    "better-sqlite3": "^11.9.1",
+    "sqlite-vec": "^0.1.6"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
