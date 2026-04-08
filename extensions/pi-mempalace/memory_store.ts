@@ -208,6 +208,36 @@ export interface KnowledgeStats {
   predicates: Record<string, number>;
 }
 
+export interface RoomInfo {
+  topic: string;
+  count: number;
+  projects: string[];
+}
+
+export interface TaxonomyNode {
+  project: string;
+  topics: { topic: string; count: number }[];
+  total: number;
+}
+
+export interface DuplicateCheckResult {
+  isDuplicate: boolean;
+  hashMatch: boolean;
+  semanticMatch: SearchResult | null;
+}
+
+export interface TimelineFact {
+  id: number;
+  subject: string;
+  predicate: string;
+  object: string;
+  valid_from: string | null;
+  valid_to: string | null;
+  confidence: number;
+  project: string;
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // Database row types
 // ---------------------------------------------------------------------------
@@ -1515,6 +1545,239 @@ export class MemoryStore {
       result[r[column] || "general"] = r.cnt;
     }
     return result;
+  }
+
+  // -----------------------------------------------------------------------
+  // List Rooms / Taxonomy / Duplicate Check / Diary / KG Timeline
+  // -----------------------------------------------------------------------
+
+  /**
+   * List topics (rooms) with counts, optionally filtered by project.
+   */
+  listRooms(project?: string): RoomInfo[] {
+    this.ensureLoaded();
+
+    let query: string;
+    let params: any[];
+
+    if (project) {
+      query = `SELECT topic, COUNT(*) as cnt FROM memories
+               WHERE project = ? GROUP BY topic ORDER BY cnt DESC`;
+      params = [project];
+    } else {
+      query = `SELECT topic, COUNT(*) as cnt FROM memories
+               GROUP BY topic ORDER BY cnt DESC`;
+      params = [];
+    }
+
+    const rows = this.db.prepare(query).all(...params) as { topic: string; cnt: number }[];
+
+    return rows.map((r) => {
+      // Find which projects use this topic
+      const projectRows = this.db
+        .prepare(
+          `SELECT DISTINCT project FROM memories WHERE topic = ?`
+        )
+        .all(r.topic) as { project: string }[];
+
+      return {
+        topic: r.topic,
+        count: r.cnt,
+        projects: projectRows.map((p) => p.project),
+      };
+    });
+  }
+
+  /**
+   * Full taxonomy: project → topics → counts.
+   */
+  getTaxonomy(): TaxonomyNode[] {
+    this.ensureLoaded();
+
+    const rows = this.db
+      .prepare(
+        `SELECT project, topic, COUNT(*) as cnt FROM memories
+         GROUP BY project, topic ORDER BY project, cnt DESC`
+      )
+      .all() as { project: string; topic: string; cnt: number }[];
+
+    const byProject: Record<string, { topic: string; count: number }[]> = {};
+    const projectTotals: Record<string, number> = {};
+
+    for (const r of rows) {
+      if (!byProject[r.project]) {
+        byProject[r.project] = [];
+        projectTotals[r.project] = 0;
+      }
+      byProject[r.project].push({ topic: r.topic, count: r.cnt });
+      projectTotals[r.project] += r.cnt;
+    }
+
+    return Object.entries(byProject)
+      .sort(([, a], [, b]) => {
+        const totalA = a.reduce((s, t) => s + t.count, 0);
+        const totalB = b.reduce((s, t) => s + t.count, 0);
+        return totalB - totalA;
+      })
+      .map(([project, topics]) => ({
+        project,
+        topics,
+        total: projectTotals[project],
+      }));
+  }
+
+  /**
+   * Check if content already exists (by hash or semantic similarity).
+   */
+  async checkDuplicate(
+    content: string,
+    threshold: number = 0.9
+  ): Promise<DuplicateCheckResult> {
+    this.ensureLoaded();
+
+    // 1. Exact hash match
+    const cHash = contentHash(content);
+    const hashRow = this.stmtFindByHash.get(cHash);
+    if (hashRow) {
+      return { isDuplicate: true, hashMatch: true, semanticMatch: null };
+    }
+
+    // 2. Semantic similarity check
+    const searchResult = await this.search(content, { n_results: 1 });
+    if (
+      searchResult.results.length > 0 &&
+      searchResult.results[0].similarity >= threshold
+    ) {
+      return {
+        isDuplicate: true,
+        hashMatch: false,
+        semanticMatch: searchResult.results[0],
+      };
+    }
+
+    return { isDuplicate: false, hashMatch: false, semanticMatch: null };
+  }
+
+  /**
+   * Write a diary entry. Stored as a memory with topic="diary" and source="diary".
+   */
+  async diaryWrite(input: {
+    agent_name: string;
+    entry: string;
+    topic?: string;
+    project?: string;
+  }): Promise<StoreResult> {
+    return this.store({
+      content: input.entry,
+      project: input.project || `diary-${input.agent_name.toLowerCase().replace(/\s+/g, "_")}`,
+      topic: input.topic || "diary",
+      source: "diary",
+      importance: 0.7,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Read recent diary entries for an agent, in chronological order.
+   */
+  diaryRead(input: {
+    agent_name: string;
+    last_n?: number;
+    project?: string;
+  }): SearchResult[] {
+    this.ensureLoaded();
+
+    const project = input.project || `diary-${input.agent_name.toLowerCase().replace(/\s+/g, "_")}`;
+    const limit = Math.min(input.last_n || 10, 100);
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, content, project, topic, source, timestamp
+         FROM memories
+         WHERE project = ? AND source = 'diary'
+         ORDER BY timestamp ASC
+         LIMIT ?`
+      )
+      .all(project, limit) as MemoryRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      text: row.content,
+      project: row.project,
+      topic: row.topic,
+      source: row.source,
+      timestamp: row.timestamp,
+      similarity: 0,
+    }));
+  }
+
+  /**
+   * Knowledge graph timeline: chronological list of facts for an entity (or all).
+   */
+  kgTimeline(entity?: string): TimelineFact[] {
+    this.ensureLoaded();
+
+    let query: string;
+    let params: any[];
+
+    if (entity) {
+      const entityId = `ent_${contentHash(entity.toLowerCase())}`;
+      query = `
+        SELECT t.id, t.predicate, t.valid_from, t.valid_to, t.confidence,
+               t.project, t.created_at,
+               s.name as subject_name, o.name as object_name
+        FROM triples t
+        JOIN entities s ON t.subject = s.id
+        JOIN entities o ON t.object = o.id
+        WHERE t.subject = ? OR t.object = ?
+        ORDER BY COALESCE(t.valid_from, t.created_at) ASC`;
+      params = [entityId, entityId];
+    } else {
+      query = `
+        SELECT t.id, t.predicate, t.valid_from, t.valid_to, t.confidence,
+               t.project, t.created_at,
+               s.name as subject_name, o.name as object_name
+        FROM triples t
+        JOIN entities s ON t.subject = s.id
+        JOIN entities o ON t.object = o.id
+        ORDER BY COALESCE(t.valid_from, t.created_at) ASC`;
+      params = [];
+    }
+
+    const rows = this.db.prepare(query).all(...params) as any[];
+
+    return rows.map((r) => ({
+      id: r.id,
+      subject: r.subject_name,
+      predicate: r.predicate,
+      object: r.object_name,
+      valid_from: r.valid_from,
+      valid_to: r.valid_to,
+      confidence: r.confidence,
+      project: r.project,
+      created_at: r.created_at,
+    }));
+  }
+
+  /**
+   * Find a triple by subject/predicate/object names (for invalidation by name).
+   */
+  findTriple(subject: string, predicate: string, object: string): number | null {
+    this.ensureLoaded();
+
+    const subjectId = `ent_${contentHash(subject.toLowerCase())}`;
+    const objectId = `ent_${contentHash(object.toLowerCase())}`;
+
+    const row = this.db
+      .prepare(
+        `SELECT id FROM triples
+         WHERE subject = ? AND predicate = ? AND object = ?
+         AND valid_to IS NULL
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(subjectId, predicate, objectId) as { id: number } | undefined;
+
+    return row ? row.id : null;
   }
 
   /** Get total memory count. */

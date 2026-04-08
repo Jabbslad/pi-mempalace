@@ -688,6 +688,174 @@ async function runTests() {
   });
 
   // -------------------------------------------------------------------
+  // List Rooms / Taxonomy / Duplicate Check / Diary / KG Timeline
+  // -------------------------------------------------------------------
+
+  test("listRooms: empty store", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const rooms = store.listRooms();
+      assert.equal(rooms.length, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("listRooms: returns topics with counts", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.store({ content: "auth stuff", project: "app", topic: "auth" });
+      await store.store({ content: "more auth", project: "app", topic: "auth" });
+      await store.store({ content: "db setup", project: "app", topic: "database" });
+      await store.store({ content: "db other", project: "api", topic: "database" });
+
+      const rooms = store.listRooms();
+      assert.ok(rooms.length >= 2);
+
+      const authRoom = rooms.find(r => r.topic === "auth");
+      assert.ok(authRoom);
+      assert.equal(authRoom.count, 2);
+
+      const dbRoom = rooms.find(r => r.topic === "database");
+      assert.ok(dbRoom);
+      assert.equal(dbRoom.count, 2);
+      assert.deepEqual(dbRoom.projects.sort(), ["api", "app"]);
+
+      // Filter by project
+      const appRooms = store.listRooms("app");
+      assert.ok(appRooms.find(r => r.topic === "auth"));
+      assert.ok(appRooms.find(r => r.topic === "database"));
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("getTaxonomy: full tree", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.store({ content: "one", project: "proj-a", topic: "auth" });
+      await store.store({ content: "two", project: "proj-a", topic: "db" });
+      await store.store({ content: "three", project: "proj-b", topic: "general" });
+
+      const taxonomy = store.getTaxonomy();
+      assert.equal(taxonomy.length, 2);
+
+      const projA = taxonomy.find(n => n.project === "proj-a");
+      assert.ok(projA);
+      assert.equal(projA.total, 2);
+      assert.equal(projA.topics.length, 2);
+
+      const projB = taxonomy.find(n => n.project === "proj-b");
+      assert.ok(projB);
+      assert.equal(projB.total, 1);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("checkDuplicate: detects exact hash match", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.store({ content: "unique content here" });
+      const result = await store.checkDuplicate("unique content here");
+      assert.equal(result.isDuplicate, true);
+      assert.equal(result.hashMatch, true);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("checkDuplicate: no match returns false", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.store({ content: "about TypeScript and JavaScript" });
+      const result = await store.checkDuplicate("something completely different about cooking pasta");
+      assert.equal(result.isDuplicate, false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("diary: write and read", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      await store.diaryWrite({ agent_name: "Claude", entry: "First session: explored the codebase" });
+      await store.diaryWrite({ agent_name: "Claude", entry: "Second session: fixed the bug" });
+
+      const entries = store.diaryRead({ agent_name: "Claude" });
+      assert.equal(entries.length, 2);
+      // Chronological order (oldest first)
+      assert.ok(entries[0].text.includes("First session"));
+      assert.ok(entries[1].text.includes("Second session"));
+      assert.equal(entries[0].source, "diary");
+      assert.equal(entries[0].project, "diary-claude");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("diary: empty read", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const entries = store.diaryRead({ agent_name: "Nobody" });
+      assert.equal(entries.length, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("kgTimeline: chronological facts", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      store.addTriple({ subject: "app", predicate: "uses", object: "MongoDB", valid_from: "2024-01-01" });
+      store.addTriple({ subject: "app", predicate: "uses", object: "PostgreSQL", valid_from: "2025-06-01" });
+      store.addTriple({ subject: "app", predicate: "deployed_on", object: "AWS", valid_from: "2024-03-01" });
+
+      // Full timeline
+      const all = store.kgTimeline();
+      assert.equal(all.length, 3);
+      // Should be chronological
+      assert.ok(all[0].valid_from <= all[1].valid_from);
+
+      // Entity-filtered timeline
+      const appTimeline = store.kgTimeline("app");
+      assert.equal(appTimeline.length, 3);
+
+      const pgTimeline = store.kgTimeline("PostgreSQL");
+      assert.equal(pgTimeline.length, 1);
+      assert.equal(pgTimeline[0].predicate, "uses");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("kgTimeline: empty", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      const timeline = store.kgTimeline();
+      assert.equal(timeline.length, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("findTriple: finds active triple by names", async () => {
+    const { store, dir } = createTempStore();
+    try {
+      store.addTriple({ subject: "app", predicate: "uses", object: "React" });
+      const id = store.findTriple("app", "uses", "React");
+      assert.ok(id !== null);
+
+      // Invalidate and check it's no longer found
+      store.invalidateTriple(id, "2025-01-01");
+      const id2 = store.findTriple("app", "uses", "React");
+      assert.equal(id2, null);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // -------------------------------------------------------------------
   // Run all tests
   // -------------------------------------------------------------------
 

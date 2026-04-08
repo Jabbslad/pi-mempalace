@@ -440,7 +440,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "Use `memory_search` to find past context. Use `memory_save` to explicitly remember something important.\n" +
       "Use `memory_recall` to browse memories for a specific project or topic.\n" +
       "Use `memory_graph` to discover cross-project connections via shared topics.\n" +
-      "Use `knowledge_add` to record structured facts. Use `knowledge_query` to query them.\n\n" +
+      "Use `knowledge_add` to record structured facts. Use `knowledge_query` to query them.\n" +
+      "Use `knowledge_invalidate` to mark facts as no longer true. Use `knowledge_timeline` for chronological history.\n" +
+      "Use `memory_diary_write` to record reflections. Use `memory_diary_read` to review past entries.\n" +
+      "Use `memory_delete` to remove specific memories. Use `memory_check_duplicate` before storing.\n\n" +
       runtime.wakeUpText;
 
     return {
@@ -934,6 +937,348 @@ export default function memoryExtension(pi: ExtensionAPI) {
     renderResult: renderTextResult,
   });
 
+  // --- memory_list_rooms ---
+  pi.registerTool({
+    name: "memory_list_rooms",
+    label: "Memory List Rooms",
+    description: "List all topics (rooms) in the memory palace, optionally filtered by project. Shows how memories are organized.",
+    promptSnippet: "memory_list_rooms(project?) — list topics with counts",
+    promptGuidelines: [
+      "Use when the user asks 'what topics do we have' or 'how are memories organized'",
+      "Filter by project to see topics within a specific project",
+      "Shows count per topic and which projects share each topic",
+    ],
+    parameters: Type.Object({
+      project: Type.Optional(
+        Type.String({ description: "Filter to a specific project (optional)" })
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const rooms = runtime.store.listRooms(params.project);
+        if (rooms.length === 0) {
+          return textResult(params.project
+            ? `No topics found in project "${params.project}".`
+            : "No topics found in the memory palace.");
+        }
+        let text = params.project
+          ? `## Topics in "${params.project}"\n\n`
+          : "## All Topics (Rooms)\n\n";
+        for (const room of rooms) {
+          const projects = room.projects.length > 1
+            ? ` (shared: ${room.projects.join(", ")})`
+            : "";
+          text += `- **${room.topic}**: ${room.count} memories${projects}\n`;
+        }
+        return textResult(text, { count: rooms.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`List rooms failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_taxonomy ---
+  pi.registerTool({
+    name: "memory_taxonomy",
+    label: "Memory Taxonomy",
+    description: "Full taxonomy of the memory palace: project → topic → count. Shows the complete organizational structure.",
+    promptSnippet: "memory_taxonomy() — full project/topic/count tree",
+    promptGuidelines: [
+      "Use when the user asks for a full overview of memory organization",
+      "Shows every project with its topics and counts",
+      "Good for understanding the overall shape of stored knowledge",
+    ],
+    parameters: Type.Object({}),
+
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const taxonomy = runtime.store.getTaxonomy();
+        if (taxonomy.length === 0) {
+          return textResult("No memories stored yet.");
+        }
+        let text = "## \uD83C\uDFF0 Memory Taxonomy\n\n";
+        for (const node of taxonomy) {
+          text += `### ${node.project} (${node.total} memories)\n`;
+          for (const t of node.topics) {
+            text += `  - ${t.topic}: ${t.count}\n`;
+          }
+          text += "\n";
+        }
+        return textResult(text, { projectCount: taxonomy.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Taxonomy failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_delete ---
+  pi.registerTool({
+    name: "memory_delete",
+    label: "Memory Delete",
+    description: "Delete a specific memory by ID. Irreversible. Use memory_search or memory_recall to find IDs first.",
+    promptSnippet: "memory_delete(id) — delete a memory by ID",
+    promptGuidelines: [
+      "Use when the user wants to remove a specific memory",
+      "The ID can be found in search or recall results",
+      "This is irreversible — confirm with the user before deleting",
+    ],
+    parameters: Type.Object({
+      id: Type.String({ description: "The memory ID to delete (e.g., 'mem_abc123')" }),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const result = runtime.store.delete(params.id);
+        runtime.totalMemories = Math.max(0, runtime.totalMemories - 1);
+        // Refresh project counts
+        const status = runtime.store.status();
+        runtime.projects = status.projects;
+        return textResult(`\u2705 Deleted memory: ${result.id}`, { status: "deleted", id: result.id });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Delete failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_check_duplicate ---
+  pi.registerTool({
+    name: "memory_check_duplicate",
+    label: "Memory Check Duplicate",
+    description: "Check if content already exists in the memory palace before storing. Checks both exact hash match and semantic similarity.",
+    promptSnippet: "memory_check_duplicate(content, threshold?) — check for existing similar content",
+    promptGuidelines: [
+      "Use before storing content when you suspect it might already exist",
+      "Returns both exact hash matches and semantically similar content",
+      "Default similarity threshold is 0.9 (90%) — adjust for stricter or looser matching",
+    ],
+    parameters: Type.Object({
+      content: Type.String({ description: "Content to check for duplicates" }),
+      threshold: Type.Optional(
+        Type.Number({ description: "Similarity threshold 0-1 (default: 0.9). Higher = stricter." })
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const result = await runtime.store.checkDuplicate(
+          params.content,
+          params.threshold
+        );
+        if (result.isDuplicate) {
+          if (result.hashMatch) {
+            return textResult(
+              "\u26A0\uFE0F **Exact duplicate** — this content already exists (hash match).",
+              { isDuplicate: true, type: "hash" }
+            );
+          }
+          const match = result.semanticMatch!;
+          return textResult(
+            `\u26A0\uFE0F **Similar content found** (${(match.similarity * 100).toFixed(1)}% match):\n\n` +
+            `[${match.project}/${match.topic}] ${match.timestamp}\n${match.text.slice(0, 200)}...`,
+            { isDuplicate: true, type: "semantic", similarity: match.similarity }
+          );
+        }
+        return textResult("\u2705 No duplicates found — safe to store.", { isDuplicate: false });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Duplicate check failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- knowledge_invalidate ---
+  pi.registerTool({
+    name: "knowledge_invalidate",
+    label: "Knowledge Invalidate",
+    description: "Mark a knowledge graph fact as no longer true. Sets an end date on the fact without deleting it, preserving history. E.g., 'myapp no longer uses MongoDB'.",
+    promptSnippet: "knowledge_invalidate(subject, predicate, object, ended?) — mark a fact as no longer true",
+    promptGuidelines: [
+      "Use when a fact has changed — e.g., switched databases, ended a project, changed preferences",
+      "Does not delete the fact — it becomes historical, queryable with at_time",
+      "If ended is not provided, defaults to today's date",
+    ],
+    parameters: Type.Object({
+      subject: Type.String({ description: "The subject entity" }),
+      predicate: Type.String({ description: "The relationship" }),
+      object: Type.String({ description: "The object entity" }),
+      ended: Type.Optional(
+        Type.String({ description: "When it stopped being true (YYYY-MM-DD, default: today)" })
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const tripleId = runtime.store.findTriple(
+          params.subject,
+          params.predicate,
+          params.object
+        );
+        if (tripleId === null) {
+          return textResult(
+            `No active fact found: **${params.subject}** ${params.predicate} **${params.object}**`,
+            { status: "not_found" }
+          );
+        }
+        const endDate = params.ended || new Date().toISOString().slice(0, 10);
+        runtime.store.invalidateTriple(tripleId, endDate);
+        return textResult(
+          `\u2705 Invalidated: **${params.subject}** ${params.predicate} **${params.object}** (ended ${endDate})`,
+          { status: "invalidated", tripleId, ended: endDate }
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Invalidation failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- knowledge_timeline ---
+  pi.registerTool({
+    name: "knowledge_timeline",
+    label: "Knowledge Timeline",
+    description: "Chronological timeline of facts in the knowledge graph. Shows the story of an entity over time, or the full timeline if no entity specified.",
+    promptSnippet: "knowledge_timeline(entity?) — chronological fact history",
+    promptGuidelines: [
+      "Use when the user asks 'what happened with X over time' or 'show me the history'",
+      "Omit entity to see the full timeline of all facts",
+      "Facts are ordered by valid_from date (or creation date if no valid_from)",
+    ],
+    parameters: Type.Object({
+      entity: Type.Optional(
+        Type.String({ description: "Entity to get timeline for (optional — omit for full timeline)" })
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const facts = runtime.store.kgTimeline(params.entity);
+        if (facts.length === 0) {
+          return textResult(
+            params.entity
+              ? `No facts found for "${params.entity}".`
+              : "No facts in the knowledge graph yet."
+          );
+        }
+        let text = params.entity
+          ? `## \uD83D\uDCC5 Timeline: ${params.entity}\n\n`
+          : "## \uD83D\uDCC5 Knowledge Timeline\n\n";
+        for (const fact of facts) {
+          const date = fact.valid_from || fact.created_at.slice(0, 10);
+          const ended = fact.valid_to ? ` \u2192 ended ${fact.valid_to}` : "";
+          const confidence = fact.confidence < 1.0 ? ` [${(fact.confidence * 100).toFixed(0)}%]` : "";
+          text += `- **${date}**${ended}: ${fact.subject} ${fact.predicate} ${fact.object}${confidence}\n`;
+        }
+        return textResult(text, { count: facts.length });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Timeline failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_diary_write ---
+  pi.registerTool({
+    name: "memory_diary_write",
+    label: "Diary Write",
+    description: "Write to your personal agent diary. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history.",
+    promptSnippet: "memory_diary_write(agent_name, entry, topic?) — write a diary entry",
+    promptGuidelines: [
+      "Use to record reflections, observations, or session summaries",
+      "Each agent gets their own diary project (diary-<agent_name>)",
+      "Diary entries are stored chronologically and searchable",
+    ],
+    parameters: Type.Object({
+      agent_name: Type.String({ description: "Your name — each agent gets their own diary" }),
+      entry: Type.String({ description: "Your diary entry — observations, thoughts, session summary" }),
+      topic: Type.Optional(
+        Type.String({ description: "Topic tag (optional, default: diary)" })
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const result = await runtime.store.diaryWrite({
+          agent_name: params.agent_name,
+          entry: params.entry,
+          topic: params.topic,
+        });
+        if (result.status === "duplicate") {
+          return textResult("This diary entry already exists.", { status: "duplicate" });
+        }
+        const project = `diary-${params.agent_name.toLowerCase().replace(/\s+/g, "_")}`;
+        return textResult(
+          `\uD83D\uDCD3 Diary entry saved (${project}/${params.topic || "diary"})`,
+          { status: "stored", id: result.id }
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Diary write failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
+  // --- memory_diary_read ---
+  pi.registerTool({
+    name: "memory_diary_read",
+    label: "Diary Read",
+    description: "Read recent diary entries. See what past sessions recorded — your journal across sessions, in chronological order.",
+    promptSnippet: "memory_diary_read(agent_name, last_n?) — read recent diary entries",
+    promptGuidelines: [
+      "Use when the user asks to review past diary entries or session reflections",
+      "Entries are returned in chronological order (oldest first)",
+      "Good for continuity — see what happened in previous sessions",
+    ],
+    parameters: Type.Object({
+      agent_name: Type.String({ description: "Your name — each agent gets their own diary" }),
+      last_n: Type.Optional(
+        Type.Number({ description: "Number of recent entries to read (default: 10, max: 100)" })
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runtime = getRuntime(ctx);
+      try {
+        const entries = runtime.store.diaryRead({
+          agent_name: params.agent_name,
+          last_n: params.last_n,
+        });
+        if (entries.length === 0) {
+          return textResult(`No diary entries found for ${params.agent_name}.`);
+        }
+        const project = `diary-${params.agent_name.toLowerCase().replace(/\s+/g, "_")}`;
+        let text = `## \uD83D\uDCD3 Diary: ${params.agent_name} (${entries.length} entries)\n\n`;
+        for (const entry of entries) {
+          const date = entry.timestamp.slice(0, 16).replace("T", " ");
+          const topicTag = entry.topic !== "diary" ? ` [${entry.topic}]` : "";
+          text += `### ${date}${topicTag}\n${entry.text}\n\n---\n\n`;
+        }
+        return textResult(text, { count: entries.length, project });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return textResult(`Diary read failed: ${msg}`);
+      }
+    },
+    renderResult: renderTextResult,
+  });
+
   // -----------------------------------------------------------------------
   // Commands
   // -----------------------------------------------------------------------
@@ -1027,16 +1372,45 @@ export default function memoryExtension(pi: ExtensionAPI) {
           break;
         }
 
+        case "rooms": {
+          const project = parts.slice(1).join(" ") || undefined;
+          pi.sendUserMessage(project
+            ? `List topics (rooms) in project: ${project}`
+            : "List all topics (rooms) in the memory palace");
+          break;
+        }
+
+        case "taxonomy": {
+          pi.sendUserMessage("Show the full memory taxonomy: projects, topics, and counts");
+          break;
+        }
+
+        case "diary": {
+          const diaryArg = parts.slice(1).join(" ") || "";
+          pi.sendUserMessage(diaryArg
+            ? `Read my diary entries: ${diaryArg}`
+            : "Read my recent diary entries");
+          break;
+        }
+
+        case "timeline": {
+          const entity = parts.slice(1).join(" ") || "";
+          pi.sendUserMessage(entity
+            ? `Show knowledge timeline for: ${entity}`
+            : "Show the full knowledge timeline");
+          break;
+        }
+
         default: {
           ctx.ui.notify(
-            "Usage: /memory [status|stats|project <name>|search <query>|graph|knowledge <entity>|on|off]",
+            "Usage: /memory [status|stats|project|search|graph|knowledge|rooms|taxonomy|diary|timeline|on|off]",
             "info"
           );
         }
       }
     },
     getArgumentCompletions: (prefix) => {
-      const commands = ["status", "stats", "project", "search", "graph", "knowledge", "on", "off"];
+      const commands = ["status", "stats", "project", "search", "graph", "knowledge", "rooms", "taxonomy", "diary", "timeline", "on", "off"];
       return commands
         .filter((c) => c.startsWith(prefix))
         .map((c) => ({ label: c, value: c, type: "text" as const }));
