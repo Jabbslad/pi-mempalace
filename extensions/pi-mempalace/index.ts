@@ -21,7 +21,6 @@ import type {
   ThemeColor,
 } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { completeSimple } from "@mariozechner/pi-ai";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
 import type { MemoryStats } from "./memory_store.js";
 import { Type } from "@sinclair/typebox";
@@ -41,6 +40,7 @@ const MEMORY_DIR = path.join(
   "memory"
 );
 const CONFIG_PATH = path.join(MEMORY_DIR, "config.json");
+const TOPIC_MODEL_NAME = "Xenova/flan-t5-small";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,7 +53,7 @@ interface MemoryConfig {
   wakeUpEnabled: boolean;
   /** Maximum tokens for wake-up context */
   wakeUpMaxTokens: number;
-  /** Infer non-general topics for auto-captured memories with the current Pi LLM */
+  /** Infer non-general topics locally with a small HuggingFace model */
   topicInferenceEnabled: boolean;
   /** Default project name (auto-detected from cwd if not set) */
   defaultProject: string | null;
@@ -172,67 +172,51 @@ function normalizeTopicLabel(label: string): string {
   return cleaned;
 }
 
-function extractFirstText(content: unknown): string {
-  if (!Array.isArray(content)) return "";
-  for (const block of content) {
-    if (typeof block === "object" && block !== null) {
-      const b = block as Record<string, unknown>;
-      if (b.type === "text" && typeof b.text === "string") {
-        return b.text;
-      }
-    }
-  }
-  return "";
+let topicGenerator: any = null;
+let topicGeneratorLoading: Promise<any> | null = null;
+
+async function getTopicGenerator(): Promise<any> {
+  if (topicGenerator) return topicGenerator;
+  if (topicGeneratorLoading) return topicGeneratorLoading;
+
+  topicGeneratorLoading = (async () => {
+    const { pipeline } = await import("@huggingface/transformers");
+    topicGenerator = await pipeline("text2text-generation", TOPIC_MODEL_NAME);
+    return topicGenerator;
+  })();
+
+  return topicGeneratorLoading;
 }
 
-async function inferTopicWithLlm(
-  ctx: ExtensionContext,
-  project: string,
-  content: string,
-  existingTopics: string[],
-): Promise<string> {
-  if (!ctx.model) return "general";
-
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-  if (!auth.ok) return "general";
-
-  const topicHint = existingTopics.length > 0
-    ? `\nExisting project topics to reuse when appropriate: ${existingTopics.slice(0, 20).join(", ")}`
-    : "";
-
-  const response = await completeSimple(ctx.model, {
-    systemPrompt:
-      "You classify Pi memory snippets into one durable topic label. " +
-      "Return exactly one lowercase kebab-case label, 1-3 words, with no punctuation except hyphens. " +
-      "Prefer stable software/workflow topics such as auth, database, tests, git, docs, memory, config, ui, api, deployment, performance, architecture, bugfix, tooling, or workflow. " +
-      "Return general only if no specific durable topic applies.",
-    messages: [{
-      role: "user",
-      content: `Project: ${project}${topicHint}\n\nMemory snippet:\n${content.slice(0, 1200)}\n\nTopic:`,
-      timestamp: Date.now(),
-    }],
-  }, {
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    maxTokens: 20,
-    temperature: 0,
-    signal: ctx.signal,
-  });
-
-  return normalizeTopicLabel(extractFirstText(response.content));
+function extractGeneratedText(output: unknown): string {
+  if (!Array.isArray(output)) return "";
+  const first = output[0];
+  if (typeof first !== "object" || first === null) return "";
+  const text = (first as Record<string, unknown>).generated_text;
+  return typeof text === "string" ? text : "";
 }
 
-async function inferTopicOrGeneral(
-  ctx: ExtensionContext,
-  store: MemoryStore,
-  project: string,
-  content: string,
-): Promise<string> {
+function buildTopicPrompt(content: string): string {
+  return [
+    "What is the main software topic? Answer with a short noun phrase.",
+    "Text:",
+    content.slice(0, 1200),
+    "Topic:",
+  ].join("\n");
+}
+
+async function inferTopicLocally(content: string): Promise<string> {
+  const generator = await getTopicGenerator();
+  const output = await generator(buildTopicPrompt(content), {
+    max_new_tokens: 8,
+    do_sample: false,
+  } as any);
+  return normalizeTopicLabel(extractGeneratedText(output));
+}
+
+async function inferTopicOrGeneral(content: string): Promise<string> {
   try {
-    const existingTopics = store.listRooms(project)
-      .map((room) => room.topic)
-      .filter((topic) => topic !== "general");
-    return await inferTopicWithLlm(ctx, project, content, existingTopics);
+    return await inferTopicLocally(content);
   } catch {
     return "general";
   }
@@ -500,7 +484,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       : exchange;
 
     const topic = runtime.config.topicInferenceEnabled
-      ? await inferTopicOrGeneral(ctx, runtime.store, runtime.currentProject, content)
+      ? await inferTopicOrGeneral(content)
       : "general";
 
     try {
@@ -637,7 +621,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const runtime = getRuntime(ctx);
       const project = params.project || runtime.currentProject;
       const topic = params.topic || (runtime.config.topicInferenceEnabled
-        ? await inferTopicOrGeneral(ctx, runtime.store, project, params.content)
+        ? await inferTopicOrGeneral(params.content)
         : "general");
 
       try {
@@ -757,7 +741,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         text += `- **Current project**: ${runtime.currentProject}\n`;
         text += `- **Auto-capture**: ${runtime.config.autoCapture ? "on" : "off"}\n`;
         text += `- **Wake-up**: ${runtime.config.wakeUpEnabled ? "on" : "off"}\n`;
-        text += `- **LLM topic inference**: ${runtime.config.topicInferenceEnabled ? "on" : "off"}\n`;
+        text += `- **Local topic inference**: ${runtime.config.topicInferenceEnabled ? "on" : "off"} (${TOPIC_MODEL_NAME})\n`;
         text += `- **Backend**: pure TypeScript (in-process)\n\n`;
 
         if (result.projects && Object.keys(result.projects).length > 0) {
@@ -1440,7 +1424,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           runtime.config.topicInferenceEnabled = mode === "on";
           saveConfig(runtime.config);
           ctx.ui.notify(
-            `LLM topic inference ${runtime.config.topicInferenceEnabled ? "enabled" : "disabled"}`,
+            `Local topic inference ${runtime.config.topicInferenceEnabled ? "enabled" : "disabled"}`,
             "info"
           );
           break;

@@ -31,8 +31,8 @@ pi-mempalace takes that core philosophy — **verbatim storage + semantic search
 - **🔄 Auto-capture** — Each Pi conversation exchange is stored automatically after each turn. Auto-captured exchanges are capped at 2,000 characters to keep storage cheap; manual saves can store longer content, which is chunked for search.
 - **🌅 Wake-up context** — Each new session starts with a whisper of who you are and what you've been up to (~600-900 tokens of "previously on your life").
 - **🔍 Semantic search** — Find past decisions by *meaning*, not keywords. "Why did we pick that database?" just works.
-- **📁 Project-aware** — Memories are tagged by project (auto-detected from your directory) and topic. Auto-capture and untitled manual saves ask your current Pi LLM for a durable topic label, falling back to `general` if inference is unavailable.
-- **🏠 Local-first** — Storage, embeddings, and search run in-process via `all-MiniLM-L6-v2` + SQLite. LLM topic inference uses your selected Pi model and can be disabled with `/memory topics off` if you want zero extra model calls.
+- **📁 Project-aware** — Memories are tagged by project (auto-detected from your directory) and topic. Auto-capture and untitled manual saves use local `flan-t5-small` for a durable topic label, falling back to `general` if inference is unavailable.
+- **🏠 Local-first** — Storage, embeddings, search, and topic inference run in-process via HuggingFace models + SQLite. Topic inference never calls Pi's selected LLM and can be disabled with `/memory topics off`.
 - **📊 Beautiful stats** — Sparkline activity charts, bar graphs by project/topic, and a TUI overlay that makes you feel like a hacker in a 90s movie.
 
 ---
@@ -51,11 +51,11 @@ That's it. `pi install` runs `npm install` automatically, which pulls in all thr
 
 | Dependency | What It Does | Native? |
 |-----------|-------------|--------|
-| `@huggingface/transformers` | Local embeddings (all-MiniLM-L6-v2, 384 dims) | No — pure JS, downloads model on first use (~80MB) |
+| `@huggingface/transformers` | Local embeddings (`all-MiniLM-L6-v2`) and topic labels (`flan-t5-small`) | No — pure JS, downloads models on first use |
 | `better-sqlite3` | SQLite database access | Yes — compiles native addon via `node-gyp` |
 | `sqlite-vec` | Vector similarity search for SQLite | Yes — ships prebuilt binary per platform |
 
-No Python. No conda. No Docker. No ChromaDB server. Topic inference uses whatever Pi model/auth you already selected; storage and search need no separate API keys. No sacrificial offerings to the dependency gods.
+No Python. No conda. No Docker. No ChromaDB server. Topic inference is local and does not use Pi model/auth; storage and search need no separate API keys. No sacrificial offerings to the dependency gods.
 
 ### Prerequisites
 
@@ -102,7 +102,7 @@ Config is stored at `~/.pi/agent/memory/config.json`:
 }
 ```
 
-LLM topic inference adds one small current-model call when auto-capturing a turn or saving a memory without an explicit topic. Toggle it with `/memory topics on` or `/memory topics off`.
+Local topic inference loads `Xenova/flan-t5-small` on first use when auto-capturing a turn or saving a memory without an explicit topic. It does not call Pi's selected LLM or any paid model API. Toggle it with `/memory topics on` or `/memory topics off`.
 
 ---
 
@@ -199,7 +199,7 @@ Benchmarked on Apple Silicon (M-series). Your mileage may vary, but it'll be fas
 |-----------|------|-------|
 | Model load (first store) | ~200ms | ☕ One-time cost per session |
 | Store 1 memory (warm, explicit topic) | ~1ms | ⚡ Blink and you'll miss it |
-| Infer topic (when enabled) | 1 small Pi LLM call | 🏷️ Better rooms, extra model latency/cost |
+| Infer topic (when enabled) | Local `flan-t5-small` call | 🏷️ Better rooms, no paid LLM call |
 | Search 100 memories | ~1ms | 🚀 Faster than you can forget |
 | Wakeup L0+L1 | <1ms | 🌅 Instant dawn |
 | Recall L2 (filtered) | <1ms | 🎯 SQL indexes go brrr |
@@ -223,7 +223,7 @@ pi-mempalace implements a Pi-native subset of those ideas in TypeScript:
 | MemPalace Concept | pi-mempalace Implementation |
 |---|---|
 | **Wings** (projects/people) | `project` field — auto-detected from git repo |
-| **Rooms** (topics within wings) | `topic` field — explicit or inferred by the current Pi LLM |
+| **Rooms** (topics within wings) | `topic` field — explicit or inferred locally with `flan-t5-small` |
 | **Drawers** (verbatim chunks) | 800-char chunks with 100-char overlap, each with its own embedding |
 | **Tunnels** (cross-wing connections) | `memory_graph` discovers shared topics across projects |
 | **4-Layer Stack** | L0 Identity → L1 Essential Story → L2 On-Demand → L3 Deep Search |
@@ -295,7 +295,7 @@ You absolutely could! MemPalace is great. But if you're already living in the pi
 - **Native pi integration** — hooks into pi's extension system, session lifecycle, and TUI
 - **Auto-capture built in** — short Pi exchanges are captured automatically; use `memory_save` for explicit durable notes
 - **Wake-up context** — L0 identity + L1 essential story, injected before you even ask
-- **Zero config** — install it and go. Topic labels use your current Pi model by default, or `/memory topics off` to keep auto-captures in `general`.
+- **Zero config** — install it and go. Topic labels use local `flan-t5-small` by default, or `/memory topics off` to keep auto-captures in `general`.
 
 ---
 
