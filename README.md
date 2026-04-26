@@ -4,13 +4,15 @@
 
 Every conversation you've ever had with an AI — every architectural decision, every late-night debugging eureka, every "let's use Postgres because..." — *poof*. Gone the moment you close the tab. Your AI has the long-term memory of a goldfish at a rave.
 
-**pi-mempalace fixes that.** It gives [pi](https://github.com/badlogic/pi-mono) agents persistent, cross-session memory. Store everything. Search it later. Never re-explain your life choices to a machine again.
+**pi-mempalace fixes that.** It gives [pi](https://github.com/badlogic/pi-mono) agents persistent, cross-session memory. Save important context, search it later, and stop re-explaining your life choices to a machine.
 
 ---
 
 ## 🏰 Standing on the Shoulders of a Memory Palace
 
-This project is directly inspired by the wonderful [MemPalace](https://www.mempalace.tech) — built by **Milla Jovovich** (yes, *that* Milla Jovovich — Leeloo from *The Fifth Element*, Alice from *Resident Evil*) and developer **Ben Sigman**.
+This project is directly inspired by the wonderful [MemPalace](https://github.com/MemPalace/mempalace) — built by **Milla Jovovich** (yes, *that* Milla Jovovich — Leeloo from *The Fifth Element*, Alice from *Resident Evil*) and developer **Ben Sigman**.
+
+> **Official MemPalace sources:** [github.com/MemPalace/mempalace](https://github.com/MemPalace/mempalace), [PyPI](https://pypi.org/project/mempalace/), and [mempalaceofficial.com](https://mempalaceofficial.com). Avoid unofficial MemPalace domains.
 
 Milla's origin story is painfully relatable: after thousands of conversations with AI, she realized every new session was a clean slate. All her decisions, reasoning, creative ideas — thrown into the void. Existing memory tools like Mem0 and Zep tried to help, but they had a fatal flaw: they used AI to decide what was worth remembering. The nuance, the "why," the reasoning behind decisions — exactly the stuff that matters — was the first to go.
 
@@ -18,7 +20,7 @@ So Milla and Ben spent months building MemPalace with Claude Code, and landed on
 
 > **Don't let AI decide what to forget — store everything, then make it findable.**
 
-Their MemPalace scored **96.6% on LongMemEval** (the standard benchmark for AI memory) in raw mode — the highest published result requiring zero API calls. The full system hit 100% with hybrid reranking, sparking a [glorious internet debate](https://www.mempalace.tech) about benchmarks and bragging rights. 7,000+ GitHub stars in 48 hours. Not bad for an actress and a developer with an idea.
+Their MemPalace scored **96.6% R@5 on LongMemEval** in raw mode with zero API calls. Current MemPalace also reports stronger hybrid retrieval results, while its maintainers now avoid headline claims that mix retrieval recall with end-to-end QA accuracy.
 
 pi-mempalace takes that core philosophy — **verbatim storage + semantic search** — and reimagines it as a native [pi](https://github.com/badlogic/pi-mono) extension. No Python. No ChromaDB. No pip install nightmares. Just pure TypeScript running in-process, fast enough to forget that forgetting was ever a problem.
 
@@ -26,7 +28,7 @@ pi-mempalace takes that core philosophy — **verbatim storage + semantic search
 
 ## ✨ What It Does
 
-- **🔄 Auto-capture** — Every conversation exchange is stored automatically after each turn. You don't have to remember to remember.
+- **🔄 Auto-capture** — Each Pi conversation exchange is stored automatically after each turn. Auto-captured exchanges are capped at 2,000 characters to keep storage cheap; manual saves can store longer content, which is chunked for search.
 - **🌅 Wake-up context** — Each new session starts with a whisper of who you are and what you've been up to (~600-900 tokens of "previously on your life").
 - **🔍 Semantic search** — Find past decisions by *meaning*, not keywords. "Why did we pick that database?" just works.
 - **📁 Project-aware** — Memories are tagged by project (auto-detected from your directory) and topic. Your work stays organized even if you don't.
@@ -130,7 +132,7 @@ memory_status()
 
 ## 🏗️ Architecture
 
-Following the [MemPalace](https://www.mempalace.tech) 4-layer memory stack:
+Inspired by the [MemPalace](https://github.com/MemPalace/mempalace) 4-layer memory stack:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -200,11 +202,11 @@ Memories live in a SQLite database at `~/.pi/agent/memory/memories.db`, powered 
 
 ---
 
-## 🏰 The Full MemPalace Architecture
+## 🏰 MemPalace Concepts in pi-mempalace
 
-The original [MemPalace](https://www.mempalace.tech) uses a gorgeous metaphorical architecture — **Wings** (top-level containers), **Rooms** (topics), **Halls** (corridors by memory type), **Closets** (compressed summaries), and **Drawers** (verbatim source files). It runs on Python with ChromaDB and includes AAAK, a custom 30x compression dialect that any LLM can read natively.
+The original [MemPalace](https://github.com/MemPalace/mempalace) uses a richer architecture — **Wings** (top-level containers), **Rooms** (topics), **Halls** (corridors by memory type), **Closets** (searchable pointer layers), and **Drawers** (verbatim source files). It runs on Python with ChromaDB by default and includes AAAK, an experimental lossy compression dialect.
 
-pi-mempalace faithfully implements the core MemPalace architecture in TypeScript:
+pi-mempalace implements a Pi-native subset of those ideas in TypeScript:
 
 | MemPalace Concept | pi-mempalace Implementation |
 |---|---|
@@ -214,19 +216,19 @@ pi-mempalace faithfully implements the core MemPalace architecture in TypeScript
 | **Tunnels** (cross-wing connections) | `memory_graph` discovers shared topics across projects |
 | **4-Layer Stack** | L0 Identity → L1 Essential Story → L2 On-Demand → L3 Deep Search |
 | **Knowledge Graph** | Temporal triples with `valid_from`/`valid_to` — "what was true when?" |
-| **ChromaDB** | SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) — same HNSW indexing, no Python |
+| **ChromaDB** | SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) — local vector search, no Python |
 
-The one thing we deliberately skip is **AAAK compression** — MemPalace's own benchmarks show it drops accuracy from 96.6% to 84.2%. We'll take the storage cost over the precision loss.
+This plugin deliberately skips several current MemPalace features: AAAK compression, closets, file/conversation mining, source adapters, hook management, repair/migration tools, and hybrid BM25 reranking.
 
 The soul is the same: **your AI should remember you.**
 
-If you want the full palace experience with all its wings and halls and drawers, go check out [mempalace.tech](https://www.mempalace.tech). Milla and Ben built something special.
+If you want the full palace experience with all its wings, halls, closets, drawers, importers, and repair tooling, use the official [MemPalace project](https://github.com/MemPalace/mempalace). Milla and Ben built something special.
 
 ---
 
 ## 📊 Benchmark Validation
 
-We reproduce [LongMemEval](https://arxiv.org/abs/2410.10813) — the standard benchmark for AI memory systems — to validate that our implementation matches MemPalace's retrieval quality. The benchmark stores 500 questions, each with ~50 timestamped conversation sessions, and measures whether the correct session appears in the top-K search results.
+We reproduce [LongMemEval](https://arxiv.org/abs/2410.10813) raw retrieval to validate this plugin's local semantic search. The benchmark stores 500 questions, each with ~50 timestamped conversation sessions, and measures whether the correct session appears in the top-K search results.
 
 ### Results (Raw Mode — Zero API, Fully Local)
 
@@ -247,7 +249,7 @@ We reproduce [LongMemEval](https://arxiv.org/abs/2410.10813) — the standard be
 | single-session-user | 🟡 92.9% | 95.7% | 70 |
 | single-session-preference | 🟡 90.0% | 96.7% | 30 |
 
-The 0.8pp R@5 gap comes from our 800-char chunking (MemPalace stores whole sessions in benchmark mode) and minor differences between sqlite-vec and ChromaDB's HNSW implementations. The weakest categories (temporal, preference) are exactly what MemPalace's hybrid modes address with keyword re-ranking and temporal boosting — features we haven't implemented.
+The 0.8pp R@5 gap comes from our 800-char chunking and differences between sqlite-vec and ChromaDB retrieval. The weakest categories (temporal, preference) are exactly what current MemPalace hybrid modes address with keyword re-ranking and temporal boosting — features this plugin has not implemented.
 
 ### Run It Yourself
 
@@ -273,13 +275,13 @@ npx tsx benchmarks/longmemeval_bench.mjs --out benchmarks/results/raw_500.jsonl
 You absolutely could! MemPalace is great. But if you're already living in the pi ecosystem:
 
 - **No Python required** — pi-mempalace is pure TypeScript, runs in-process
-- **Full MemPalace architecture** — 4-layer stack, chunking, palace graph, knowledge graph
+- **Pi-native MemPalace-inspired subset** — 4-layer wake-up/search model, chunking, palace graph, knowledge graph
 - **SQLite instead of ChromaDB** — one file, no server, native Node.js via better-sqlite3
 - **Palace graph with tunnels** — discover cross-project connections via shared topics
 - **Temporal knowledge graph** — structured facts with time validity ("what was true when?")
 - **Auto-chunking** — long content split into 800-char chunks with overlap, just like MemPalace
 - **Native pi integration** — hooks into pi's extension system, session lifecycle, and TUI
-- **Auto-capture built in** — no manual memory management needed
+- **Auto-capture built in** — short Pi exchanges are captured automatically; use `memory_save` for explicit durable notes
 - **Wake-up context** — L0 identity + L1 essential story, injected before you even ask
 - **Zero config** — install it and go. It just works.
 
@@ -300,7 +302,7 @@ MIT — because memories should be free.
 </p>
 
 <p align="center">
-  🏰 Inspired by <a href="https://www.mempalace.tech">MemPalace</a> by Milla Jovovich & Ben Sigman
+  🏰 Inspired by <a href="https://github.com/MemPalace/mempalace">MemPalace</a> by Milla Jovovich & Ben Sigman
   <br/>
   🧠 Built for <a href="https://github.com/badlogic/pi-mono">pi</a> with ❤️ and a fear of forgetting
 </p>

@@ -18,6 +18,7 @@
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ThemeColor,
 } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
@@ -192,7 +193,7 @@ function renderTextResult(result: any) {
 function barChart(
   items: [string, number][],
   maxBarWidth: number,
-  theme: { fg: (color: string, text: string) => string },
+  theme: { fg: (color: ThemeColor, text: string) => string },
 ): string[] {
   if (items.length === 0) return ["  (none)"];
   const maxVal = Math.max(...items.map(([, v]) => v));
@@ -928,7 +929,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           }
         }
         
-        return textResult(text, stats);
+        return textResult(text, { ...stats });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         return textResult(`Knowledge status failed: ${msg}`);
