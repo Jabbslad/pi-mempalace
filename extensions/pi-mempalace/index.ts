@@ -21,6 +21,7 @@ import type {
   ThemeColor,
 } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import { completeSimple } from "@mariozechner/pi-ai";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
 import type { MemoryStats } from "./memory_store.js";
 import { Type } from "@sinclair/typebox";
@@ -52,6 +53,8 @@ interface MemoryConfig {
   wakeUpEnabled: boolean;
   /** Maximum tokens for wake-up context */
   wakeUpMaxTokens: number;
+  /** Infer non-general topics for auto-captured memories with the current Pi LLM */
+  topicInferenceEnabled: boolean;
   /** Default project name (auto-detected from cwd if not set) */
   defaultProject: string | null;
 }
@@ -84,6 +87,7 @@ function defaultConfig(): MemoryConfig {
     autoCapture: true,
     wakeUpEnabled: true,
     wakeUpMaxTokens: 800,
+    topicInferenceEnabled: true,
     defaultProject: null,
   };
 }
@@ -146,6 +150,92 @@ function extractTextFromContent(content: unknown): string {
     }
   }
   return textParts.join("\n");
+}
+
+function normalizeTopicLabel(label: string): string {
+  const cleaned = label
+    .trim()
+    .replace(/^```[a-z]*\s*/i, "")
+    .replace(/\s*```$/g, "")
+    .replace(/^topic\s*:\s*/i, "")
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+
+  if (!cleaned || cleaned.length < 2) return "general";
+  if (["none", "n-a", "na", "unknown", "misc", "other"].includes(cleaned)) return "general";
+  return cleaned;
+}
+
+function extractFirstText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  for (const block of content) {
+    if (typeof block === "object" && block !== null) {
+      const b = block as Record<string, unknown>;
+      if (b.type === "text" && typeof b.text === "string") {
+        return b.text;
+      }
+    }
+  }
+  return "";
+}
+
+async function inferTopicWithLlm(
+  ctx: ExtensionContext,
+  project: string,
+  content: string,
+  existingTopics: string[],
+): Promise<string> {
+  if (!ctx.model) return "general";
+
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+  if (!auth.ok) return "general";
+
+  const topicHint = existingTopics.length > 0
+    ? `\nExisting project topics to reuse when appropriate: ${existingTopics.slice(0, 20).join(", ")}`
+    : "";
+
+  const response = await completeSimple(ctx.model, {
+    systemPrompt:
+      "You classify Pi memory snippets into one durable topic label. " +
+      "Return exactly one lowercase kebab-case label, 1-3 words, with no punctuation except hyphens. " +
+      "Prefer stable software/workflow topics such as auth, database, tests, git, docs, memory, config, ui, api, deployment, performance, architecture, bugfix, tooling, or workflow. " +
+      "Return general only if no specific durable topic applies.",
+    messages: [{
+      role: "user",
+      content: `Project: ${project}${topicHint}\n\nMemory snippet:\n${content.slice(0, 1200)}\n\nTopic:`,
+      timestamp: Date.now(),
+    }],
+  }, {
+    apiKey: auth.apiKey,
+    headers: auth.headers,
+    maxTokens: 20,
+    temperature: 0,
+    signal: ctx.signal,
+  });
+
+  return normalizeTopicLabel(extractFirstText(response.content));
+}
+
+async function inferTopicOrGeneral(
+  ctx: ExtensionContext,
+  store: MemoryStore,
+  project: string,
+  content: string,
+): Promise<string> {
+  try {
+    const existingTopics = store.listRooms(project)
+      .map((room) => room.topic)
+      .filter((topic) => topic !== "general");
+    return await inferTopicWithLlm(ctx, project, content, existingTopics);
+  } catch {
+    return "general";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -409,11 +499,15 @@ export default function memoryExtension(pi: ExtensionAPI) {
       ? exchange.slice(0, 2000) + "\n[truncated]"
       : exchange;
 
+    const topic = runtime.config.topicInferenceEnabled
+      ? await inferTopicOrGeneral(ctx, runtime.store, runtime.currentProject, content)
+      : "general";
+
     try {
       const result = await runtime.store.store({
         content,
         project: runtime.currentProject,
-        topic: "general",
+        topic,
         source: "auto-capture",
         timestamp: new Date().toISOString(),
         session_id: getSessionKey(ctx),
@@ -542,12 +636,15 @@ export default function memoryExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const runtime = getRuntime(ctx);
       const project = params.project || runtime.currentProject;
+      const topic = params.topic || (runtime.config.topicInferenceEnabled
+        ? await inferTopicOrGeneral(ctx, runtime.store, project, params.content)
+        : "general");
 
       try {
         const result = await runtime.store.store({
           content: params.content,
           project,
-          topic: params.topic || "general",
+          topic,
           source: "manual-save",
           importance: params.importance ?? 0.8, // Manual saves rank higher than auto-captures (0.5)
           timestamp: new Date().toISOString(),
@@ -563,8 +660,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
         runtime.projects[project] = (runtime.projects[project] || 0) + 1;
 
         return textResult(
-          `✅ Saved to memory (${result.id}) in ${project}/${params.topic || "general"}`,
-          { status: "stored", id: result.id, project },
+          `✅ Saved to memory (${result.id}) in ${project}/${topic}`,
+          { status: "stored", id: result.id, project, topic },
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -660,6 +757,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         text += `- **Current project**: ${runtime.currentProject}\n`;
         text += `- **Auto-capture**: ${runtime.config.autoCapture ? "on" : "off"}\n`;
         text += `- **Wake-up**: ${runtime.config.wakeUpEnabled ? "on" : "off"}\n`;
+        text += `- **LLM topic inference**: ${runtime.config.topicInferenceEnabled ? "on" : "off"}\n`;
         text += `- **Backend**: pure TypeScript (in-process)\n\n`;
 
         if (result.projects && Object.keys(result.projects).length > 0) {
@@ -1285,7 +1383,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // -----------------------------------------------------------------------
 
   pi.registerCommand("memory", {
-    description: "Memory management: status, search, project, graph, knowledge, on/off",
+    description: "Memory management: status, search, project, graph, knowledge, topics, on/off",
     handler: async (args, ctx) => {
       const runtime = getRuntime(ctx);
       const parts = (args || "").trim().split(/\s+/);
@@ -1330,6 +1428,21 @@ export default function memoryExtension(pi: ExtensionAPI) {
           runtime.config.wakeUpEnabled = false;
           saveConfig(runtime.config);
           ctx.ui.notify("Memory disabled", "info");
+          break;
+        }
+
+        case "topics": {
+          const mode = parts[1];
+          if (mode !== "on" && mode !== "off") {
+            ctx.ui.notify("Usage: /memory topics [on|off]", "warning");
+            break;
+          }
+          runtime.config.topicInferenceEnabled = mode === "on";
+          saveConfig(runtime.config);
+          ctx.ui.notify(
+            `LLM topic inference ${runtime.config.topicInferenceEnabled ? "enabled" : "disabled"}`,
+            "info"
+          );
           break;
         }
 
@@ -1404,14 +1517,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
         default: {
           ctx.ui.notify(
-            "Usage: /memory [status|stats|project|search|graph|knowledge|rooms|taxonomy|diary|timeline|on|off]",
+            "Usage: /memory [status|stats|project|search|graph|knowledge|rooms|taxonomy|diary|timeline|topics on|topics off|on|off]",
             "info"
           );
         }
       }
     },
     getArgumentCompletions: (prefix) => {
-      const commands = ["status", "stats", "project", "search", "graph", "knowledge", "rooms", "taxonomy", "diary", "timeline", "on", "off"];
+      const commands = ["status", "stats", "project", "search", "graph", "knowledge", "rooms", "taxonomy", "diary", "timeline", "topics", "on", "off"];
       return commands
         .filter((c) => c.startsWith(prefix))
         .map((c) => ({ label: c, value: c, type: "text" as const }));

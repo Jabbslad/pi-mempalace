@@ -31,8 +31,8 @@ pi-mempalace takes that core philosophy — **verbatim storage + semantic search
 - **🔄 Auto-capture** — Each Pi conversation exchange is stored automatically after each turn. Auto-captured exchanges are capped at 2,000 characters to keep storage cheap; manual saves can store longer content, which is chunked for search.
 - **🌅 Wake-up context** — Each new session starts with a whisper of who you are and what you've been up to (~600-900 tokens of "previously on your life").
 - **🔍 Semantic search** — Find past decisions by *meaning*, not keywords. "Why did we pick that database?" just works.
-- **📁 Project-aware** — Memories are tagged by project (auto-detected from your directory) and topic. Your work stays organized even if you don't.
-- **🏠 Fully local** — Embeddings computed in-process via `all-MiniLM-L6-v2`. No cloud calls. No API keys. No surveillance capitalism. Just you and your memories.
+- **📁 Project-aware** — Memories are tagged by project (auto-detected from your directory) and topic. Auto-capture and untitled manual saves ask your current Pi LLM for a durable topic label, falling back to `general` if inference is unavailable.
+- **🏠 Local-first** — Storage, embeddings, and search run in-process via `all-MiniLM-L6-v2` + SQLite. LLM topic inference uses your selected Pi model and can be disabled with `/memory topics off` if you want zero extra model calls.
 - **📊 Beautiful stats** — Sparkline activity charts, bar graphs by project/topic, and a TUI overlay that makes you feel like a hacker in a 90s movie.
 
 ---
@@ -55,7 +55,7 @@ That's it. `pi install` runs `npm install` automatically, which pulls in all thr
 | `better-sqlite3` | SQLite database access | Yes — compiles native addon via `node-gyp` |
 | `sqlite-vec` | Vector similarity search for SQLite | Yes — ships prebuilt binary per platform |
 
-No Python. No conda. No Docker. No ChromaDB server. No API keys. No sacrificial offerings to the dependency gods.
+No Python. No conda. No Docker. No ChromaDB server. Topic inference uses whatever Pi model/auth you already selected; storage and search need no separate API keys. No sacrificial offerings to the dependency gods.
 
 ### Prerequisites
 
@@ -87,6 +87,22 @@ memory_recall(project: "myapp")
 # Check on your growing brain
 memory_status()
 ```
+
+### Configuration
+
+Config is stored at `~/.pi/agent/memory/config.json`:
+
+```json
+{
+  "autoCapture": true,
+  "wakeUpEnabled": true,
+  "wakeUpMaxTokens": 800,
+  "topicInferenceEnabled": true,
+  "defaultProject": null
+}
+```
+
+LLM topic inference adds one small current-model call when auto-capturing a turn or saving a memory without an explicit topic. Toggle it with `/memory topics on` or `/memory topics off`.
 
 ---
 
@@ -182,7 +198,8 @@ Benchmarked on Apple Silicon (M-series). Your mileage may vary, but it'll be fas
 | Operation | Time | Vibes |
 |-----------|------|-------|
 | Model load (first store) | ~200ms | ☕ One-time cost per session |
-| Store 1 memory (warm) | ~1ms | ⚡ Blink and you'll miss it |
+| Store 1 memory (warm, explicit topic) | ~1ms | ⚡ Blink and you'll miss it |
+| Infer topic (when enabled) | 1 small Pi LLM call | 🏷️ Better rooms, extra model latency/cost |
 | Search 100 memories | ~1ms | 🚀 Faster than you can forget |
 | Wakeup L0+L1 | <1ms | 🌅 Instant dawn |
 | Recall L2 (filtered) | <1ms | 🎯 SQL indexes go brrr |
@@ -206,7 +223,7 @@ pi-mempalace implements a Pi-native subset of those ideas in TypeScript:
 | MemPalace Concept | pi-mempalace Implementation |
 |---|---|
 | **Wings** (projects/people) | `project` field — auto-detected from git repo |
-| **Rooms** (topics within wings) | `topic` field — set per memory |
+| **Rooms** (topics within wings) | `topic` field — explicit or inferred by the current Pi LLM |
 | **Drawers** (verbatim chunks) | 800-char chunks with 100-char overlap, each with its own embedding |
 | **Tunnels** (cross-wing connections) | `memory_graph` discovers shared topics across projects |
 | **4-Layer Stack** | L0 Identity → L1 Essential Story → L2 On-Demand → L3 Deep Search |
@@ -278,7 +295,7 @@ You absolutely could! MemPalace is great. But if you're already living in the pi
 - **Native pi integration** — hooks into pi's extension system, session lifecycle, and TUI
 - **Auto-capture built in** — short Pi exchanges are captured automatically; use `memory_save` for explicit durable notes
 - **Wake-up context** — L0 identity + L1 essential story, injected before you even ask
-- **Zero config** — install it and go. It just works.
+- **Zero config** — install it and go. Topic labels use your current Pi model by default, or `/memory topics off` to keep auto-captures in `general`.
 
 ---
 

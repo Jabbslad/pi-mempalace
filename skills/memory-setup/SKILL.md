@@ -71,6 +71,7 @@ If the user has exported conversations (from Claude, ChatGPT, etc.), help them s
 Once set up, memory works automatically:
 
 - **Auto-capture**: Every conversation turn is embedded and stored directly (no buffering)
+- **Topic inference**: Auto-capture and topicless manual saves use the current Pi LLM to choose a durable topic label, falling back to `general`
 - **Wake-up**: Each new session starts with your identity + recent context (~600-900 tokens)
 - **Search**: Use `memory_search` to find past conversations by meaning
 - **Save**: Use `memory_save` to explicitly remember important decisions
@@ -85,6 +86,7 @@ Config is stored at `~/.pi/agent/memory/config.json`:
   "autoCapture": true,
   "wakeUpEnabled": true,
   "wakeUpMaxTokens": 800,
+  "topicInferenceEnabled": true,
   "defaultProject": null
 }
 ```
@@ -94,4 +96,5 @@ Config is stored at `~/.pi/agent/memory/config.json`:
 - `/memory status` — show memory overview
 - `/memory project <name>` — set current project
 - `/memory on` / `/memory off` — enable/disable memory
+- `/memory topics on` / `/memory topics off` — enable/disable LLM topic inference
 - `/memory search <query>` — quick search
